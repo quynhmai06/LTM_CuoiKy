@@ -46,21 +46,31 @@ class Server:
 
         while True:
             try:
-                message = connection.recv(1024)
-                print(str(message.decode()))
-                if message:
-                    if str(message.decode()) == "FILE":
-                        self.broadcastFile(connection, room_id, user_id)
+                header = connection.recv(1024)
+                if not header:
+                    self.remove(connection, room_id)
+                    break
 
-                    else:
-                        message_to_send = "<" + str(user_id) + "> " + message.decode()
-                        self.broadcast(message_to_send, connection, room_id)
+                tag = header.decode(errors="ignore")
+
+                if tag == "FILE":
+                    self.broadcastFile(connection, room_id, user_id)
+
+                elif tag == "IMAGE":
+                    self.broadcastImage(connection, room_id, user_id)
 
                 else:
-                    self.remove(connection, room_id)
+                    msg = tag
+                    if msg:
+                        message_to_send = f"<{user_id}> {msg}"
+                        self.broadcast(message_to_send, connection, room_id)
+                    else:
+                        self.remove(connection, room_id)
+                        break
+
             except Exception as e:
-                print(repr(e))
-                print("Client da ngat ket noi")
+                print("Client da ngat ket noi / loi:", repr(e))
+                self.remove(connection, room_id)
                 break
     
     def broadcastFile(self, connection, room_id, user_id):
@@ -94,6 +104,46 @@ class Server:
                         client.close()
                         self.remove(client, room_id)
         print("Gui file xong")
+
+
+    def broadcastImage(self, connection, room_id, user_id):
+        try:
+            size_str = connection.recv(1024).decode(errors="ignore")
+            try:
+                total_len = int(size_str)
+            except:
+                total_len = 0
+            for client in list(self.rooms[room_id]):
+                if client is connection:
+                    continue
+                try:
+                    client.send("IMAGE".encode())
+                    time.sleep(0.05)
+                    client.send(str(total_len).encode())
+                    time.sleep(0.05)
+                    client.send(user_id.encode())
+                except:
+                    client.close()
+                    self.remove(client, room_id)
+            sent_total = 0
+            while sent_total < total_len:
+                chunk = connection.recv(min(4096, total_len - sent_total))
+                if not chunk:
+                    break
+                sent_total += len(chunk)
+                for client in list(self.rooms[room_id]):
+                    if client is connection:
+                        continue
+                    try:
+                        client.send(chunk)
+                    except:
+                        client.close()
+                        self.remove(client, room_id)
+
+            print(f"Gui image xong ({sent_total} bytes) tu {user_id}")
+        except Exception as e:
+            print("Loi broadcastImage:", repr(e))
+
 
     def broadcast(self, message_to_send, connection, room_id):
         for client in self.rooms[room_id]:

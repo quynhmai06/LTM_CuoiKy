@@ -620,42 +620,37 @@ class GUI:
         is_image = file_ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp']
         
         if is_image:
-            # Gửi ảnh dưới dạng IMAGE
-            self.server.send("IMAGE".encode())
-            time.sleep(0.1)
-            
-            # Đọc và gửi ảnh
+            self.server.send(b"IMAGE")
+            time.sleep(0.05)
+
             with open(self.filename, "rb") as img_file:
                 img_data = img_file.read()
-                # Gửi kích thước ảnh
                 self.server.send(str(len(img_data)).encode())
-                time.sleep(0.1)
-                # Gửi dữ liệu ảnh
+                time.sleep(0.05)
                 self.server.send(img_data)
-            
-            # Hiển thị ảnh đã gửi
+
             with open(self.filename, "rb") as img_file:
                 self.add_message("", is_sent=True, image_data=img_file.read())
         else:
-            # Gửi file thông thường
-            self.server.send("FILE".encode())
-            time.sleep(0.1)
-            self.server.send(str("client_" + os.path.basename(self.filename)).encode())
-            time.sleep(0.1)
+            self.server.send(b"FILE")
+            time.sleep(0.05)
+            basename = os.path.basename(self.filename)
+            self.server.send(("client_" + basename).encode())
+            time.sleep(0.05)
             self.server.send(str(os.path.getsize(self.filename)).encode())
-            time.sleep(0.1)
+            time.sleep(0.05)
 
-            file = open(self.filename, "rb")
-            data = file.read(1024)
-            while data:
-                self.server.send(data)
-                data = file.read(1024)
-            
-            # Hiển thị file đã gửi
-            self.add_message("📄 " + os.path.basename(self.filename), is_sent=True)
+            with open(self.filename, "rb") as f:
+                while True:
+                    data = f.read(4096)
+                    if not data:
+                        break
+                    self.server.send(data)
+            self.add_message("📄 " + basename, is_sent=True)
         
         self.fileLocation.configure(text="")
         self.sengFileBtn.place_forget()
+
 
     def sendButton(self, msg):
         if msg.strip():
@@ -673,49 +668,47 @@ class GUI:
     def receive(self):
         while True:
             try:
-                message = self.server.recv(1024).decode()
+                header = self.server.recv(1024)
+                if not header:
+                    break
+                tag = header.decode(errors="ignore")
 
-                if str(message) == "IMAGE":
-                    # Nhận ảnh
-                    img_size = int(self.server.recv(1024).decode())
-                    
-                    # Nhận dữ liệu ảnh
+                if tag == "IMAGE":
+                    size_str = self.server.recv(1024).decode()
+                    total_len = int(size_str)
+                    sender = self.server.recv(1024).decode()
+
                     img_data = b""
-                    while len(img_data) < img_size:
-                        chunk = self.server.recv(min(1024, img_size - len(img_data)))
+                    while len(img_data) < total_len:
+                        chunk = self.server.recv(min(4096, total_len - len(img_data)))
                         if not chunk:
                             break
                         img_data += chunk
-                    
-                    # Hiển thị ảnh nhận được
-                    self.add_message("", is_sent=False, sender_name=self.name, image_data=img_data)
 
-                elif str(message) == "FILE":
+                    self.add_message("", is_sent=False, sender_name=sender, image_data=img_data)
+
+                elif tag == "FILE":
                     file_name = self.server.recv(1024).decode()
-                    lenOfFile = self.server.recv(1024).decode()
+                    lenOfFile = int(self.server.recv(1024).decode())
                     send_user = self.server.recv(1024).decode()
-
-                    if os.path.exists(file_name):
-                        os.remove(file_name)
 
                     total = 0
                     with open(file_name, 'wb') as file:
-                        while str(total) != lenOfFile:
-                            data = self.server.recv(1024)
-                            total = total + len(data)
+                        while total < lenOfFile:
+                            data = self.server.recv(min(4096, lenOfFile - total))
+                            if not data:
+                                break
+                            total += len(data)
                             file.write(data)
 
-                    # Hiển thị file nhận được
                     self.add_message(f"📄 {file_name}", is_sent=False, sender_name=send_user)
 
                 else:
-                    # Kiểm tra nếu là tin nhắn từ bạn
+                    message = tag
                     if message.startswith("<Ban>"):
                         clean_msg = message.replace("<Ban>", "").strip()
                         self.add_message(clean_msg, is_sent=True)
                     else:
-                        # Tin nhắn từ người khác - tách tên và nội dung
-                        # Format: <tên> nội dung
                         if message.startswith("<") and ">" in message:
                             end_bracket = message.index(">")
                             sender = message[1:end_bracket]
@@ -728,6 +721,7 @@ class GUI:
                 print(f"Có lỗi xảy ra: {e}")
                 self.server.close()
                 break
+
 
     def sendMessage(self):
         self.server.send(self.msg.encode())
