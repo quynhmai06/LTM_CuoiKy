@@ -10,6 +10,8 @@ from datetime import datetime
 from PIL import Image, ImageTk
 import io
 import base64
+import uuid
+
 
 class RoundedText(tk.Canvas):
     def __init__(self, parent, **kwargs):
@@ -19,6 +21,8 @@ class GUI:
     def __init__(self, ip_address, port):
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server.connect((ip_address, port))
+        self.default_ttl_ms = 0     
+        self.msg_widgets = {}        
 
         self.Window = tk.Tk()
         self.Window.withdraw()
@@ -516,12 +520,26 @@ class GUI:
                 bubble.pack(side="top")
             
             # Thời gian
-            time_label = tk.Label(content_frame,
-                                text=current_time,
-                                bg="#18191A",
-                                fg="#8696A0",
-                                font="Helvetica 7")
+            time_label = tk.Label(
+                content_frame,
+                text=current_time,
+                bg="#18191A",
+                fg="#8696A0",
+                font="Helvetica 7"
+            )
             time_label.pack(side="top", anchor="e", pady=(2, 0))
+
+            # Nhãn trạng thái để hiển thị "Đã xem"
+            status_label = tk.Label(
+                content_frame,
+                text="",           # sẽ cập nhật thành "Đã xem" khi nhận READ
+                bg="#18191A",
+                fg="#8696A0",
+                font="Helvetica 7"
+            )
+            status_label.pack(side="top", anchor="e", pady=(0, 0))
+            msg_container._status_label = status_label
+
             
         else:
             # Tin nhắn nhận - bên trái, xám, có avatar và tên
@@ -587,16 +605,74 @@ class GUI:
                 bubble.pack(anchor="w")
             
             # Thời gian
-            time_label = tk.Label(text_container,
-                                text=current_time,
-                                bg="#18191A",
-                                fg="#8696A0",
-                                font="Helvetica 7")
+            time_label = tk.Label(
+                text_container,
+                text=current_time,
+                bg="#18191A",
+                fg="#8696A0",
+                font="Helvetica 7"
+            )
             time_label.pack(anchor="w", pady=(2, 0))
+
         
         # Scroll xuống cuối
         self.messages_frame.update_idletasks()
         self.chat_canvas.yview_moveto(1.0)
+        return msg_container 
+    
+    def _new_msg_id(self):
+        return uuid.uuid4().hex
+
+    def _attach_msg_id(self, container, msg_id):
+        container._msg_id = msg_id
+        self.msg_widgets[msg_id] = container
+
+    def _remove_msg_widget(self, msg_id):
+        w = self.msg_widgets.pop(msg_id, None)
+        if w:
+            try:
+                w.destroy()
+            except:
+                pass
+
+    def _recall_msg(self, msg_id):
+        if not msg_id:
+            return
+        try:
+            self.server.send(b"RECALL")
+            time.sleep(0.02)
+            self.server.send(msg_id.encode())
+        except Exception as e:
+            print("Lỗi gửi RECALL:", e)
+        self._remove_msg_widget(msg_id)
+
+    def _show_msg_menu(self, widget, msg_id):
+        menu = tk.Menu(self.Window, tearoff=0)
+        menu.configure(bg="#2f3136", fg="white", activebackground="#10B981", activeforeground="white")
+
+        menu.add_command(
+            label="🗑️  Gỡ tin nhắn",
+            command=lambda: self._recall_msg(msg_id)
+        )
+
+        submenu = tk.Menu(menu, tearoff=0, bg="#2f3136", fg="white", activebackground="#10B981", activeforeground="white")
+        for sec in (5, 10, 30, 60):
+            submenu.add_command(
+                label=f"⏱️ {sec} giây",
+                command=lambda s=sec, mid=msg_id: self.Window.after(s*1000, lambda: self._recall_msg(mid))
+            )
+        menu.add_cascade(label="⏰  Tự hủy sau...", menu=submenu)
+
+        try:
+            menu.tk_popup(self.Window.winfo_pointerx(), self.Window.winfo_pointery())
+        finally:
+            menu.grab_release()
+
+    def _bind_right_click(self, widget, msg_id):
+        widget.bind("<Button-3>", lambda e, mid=msg_id: self._show_msg_menu(widget, mid))
+        for ch in widget.winfo_children():
+            self._bind_right_click(ch, msg_id)
+
 
     def browseFile(self):
         self.filename = filedialog.askopenfilename(initialdir="/",
@@ -654,10 +730,21 @@ class GUI:
 
     def sendButton(self, msg):
         if msg.strip():
-            self.msg = msg
+            if msg.startswith("/ttl "):
+                parts = msg.split(" ", 2)
+                if len(parts) >= 3 and parts[1].isdigit():
+                    self.default_ttl_ms = int(parts[1]) * 1000  # giây -> ms
+                    self.msg = parts[2]
+                else:
+                    return
+            else:
+                self.default_ttl_ms = 0
+                self.msg = msg
+
             self.entryMsg.delete(0, tk.END)
-            snd = threading.Thread(target=self.sendMessage)
+            snd = threading.Thread(target=self.sendMessage, daemon=True)
             snd.start()
+
 
     def sendLike(self):
         """Send like emoji to chat"""
@@ -703,6 +790,47 @@ class GUI:
 
                     self.add_message(f"📄 {file_name}", is_sent=False, sender_name=send_user)
 
+                elif tag == "MSG":
+                    msg_id = self.server.recv(1024).decode()
+                    ttl_ms = int(self.server.recv(1024).decode())
+                    sender = self.server.recv(1024).decode()
+                    content_len = int(self.server.recv(1024).decode())
+
+                    buf = b""
+                    while len(buf) < content_len:
+                        chunk = self.server.recv(min(4096, content_len - len(buf)))
+                        if not chunk:
+                            break
+                        buf += chunk
+                    text = buf.decode(errors="ignore")
+
+                    is_me = (sender == self.name)
+                    container = self.add_message(text, is_sent=is_me, sender_name=(None if is_me else sender))
+                    self._attach_msg_id(container, msg_id)
+
+                    if not is_me:
+                        try:
+                            self.server.send(b"ACK")
+                            time.sleep(0.02)
+                            self.server.send(msg_id.encode())
+                        except Exception as e:
+                            print("ACK error:", e)
+
+                    if ttl_ms and ttl_ms > 0 and is_me:
+                        self.Window.after(ttl_ms, lambda mid=msg_id: self._recall_msg(mid))
+
+                elif tag == "RECALL":
+                    msg_id = self.server.recv(1024).decode()
+                    _sender = self.server.recv(1024).decode()
+                    self._remove_msg_widget(msg_id)
+
+                elif tag == "READ":
+                    msg_id = self.server.recv(1024).decode()
+                    reader = self.server.recv(1024).decode()
+                    cont = self.msg_widgets.get(msg_id)
+                    if cont and hasattr(cont, "_status_label"):
+                        cont._status_label.config(text="Đã xem")
+
                 else:
                     message = tag
                     if message.startswith("<Ban>"):
@@ -724,9 +852,31 @@ class GUI:
 
 
     def sendMessage(self):
-        self.server.send(self.msg.encode())
-        # Hiển thị tin nhắn đã gửi
-        self.add_message(self.msg, is_sent=True)
+        content_bytes = self.msg.encode()
+        msg_id = self._new_msg_id()
+        ttl_ms = str(self.default_ttl_ms)  
+
+        try:
+            self.server.send(b"MSG")
+            time.sleep(0.02)
+            self.server.send(msg_id.encode())
+            time.sleep(0.02)
+            self.server.send(ttl_ms.encode())
+            time.sleep(0.02)
+            self.server.send(str(len(content_bytes)).encode())
+            time.sleep(0.02)
+            self.server.send(content_bytes)
+        except Exception as e:
+            print("Lỗi gửi MSG:", e)
+            return
+
+        container = self.add_message(self.msg, is_sent=True)
+        self._bind_right_click(container, msg_id)
+        self._attach_msg_id(container, msg_id)
+
+        if self.default_ttl_ms and int(self.default_ttl_ms) > 0:
+            self.Window.after(int(self.default_ttl_ms), lambda mid=msg_id: self._recall_msg(mid))
+
 
     def show_emoji_picker(self):
         """Hiển thị bảng chọn emoji"""

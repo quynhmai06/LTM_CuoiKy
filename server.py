@@ -58,6 +58,14 @@ class Server:
 
                 elif tag == "IMAGE":
                     self.broadcastImage(connection, room_id, user_id)
+                elif tag == "MSG":
+                    self.broadcastMsg(connection, room_id, user_id)
+
+                elif tag == "RECALL":
+                    self.broadcastRecall(connection, room_id, user_id)
+
+                elif tag == "ACK":
+                    self.handleAck(connection, room_id, user_id)
 
                 else:
                     msg = tag
@@ -143,6 +151,72 @@ class Server:
             print(f"Gui image xong ({sent_total} bytes) tu {user_id}")
         except Exception as e:
             print("Loi broadcastImage:", repr(e))
+
+    def broadcastMsg(self, connection, room_id, user_id):
+        try:
+            msg_id = connection.recv(1024).decode(errors="ignore")
+            ttl_ms = connection.recv(1024).decode(errors="ignore")
+            content_len = int(connection.recv(1024).decode(errors="ignore"))
+
+            for client in list(self.rooms[room_id]):
+                if client is connection:
+                    continue
+                try:
+                    client.send(b"MSG");           time.sleep(0.02)
+                    client.send(msg_id.encode());  time.sleep(0.02)
+                    client.send(ttl_ms.encode());  time.sleep(0.02)
+                    client.send(user_id.encode()); time.sleep(0.02)  
+                    client.send(str(content_len).encode()); time.sleep(0.02)
+                except:
+                    try: client.close()
+                    finally: self.remove(client, room_id)
+
+            total = 0
+            while total < content_len:
+                chunk = connection.recv(min(4096, content_len - total))
+                if not chunk:
+                    break
+                total += len(chunk)
+                for client in list(self.rooms[room_id]):
+                    if client is connection:
+                        continue
+                    try:
+                        client.send(chunk)
+                    except:
+                        try: client.close()
+                        finally: self.remove(client, room_id)
+        except Exception as e:
+            print("Loi broadcastMsg:", repr(e))
+
+    def broadcastRecall(self, connection, room_id, user_id):
+        try:
+            msg_id = connection.recv(1024).decode(errors="ignore")
+            for client in list(self.rooms[room_id]):
+                try:
+                    client.send(b"RECALL");        time.sleep(0.02)
+                    client.send(msg_id.encode());  time.sleep(0.02)
+                    client.send(user_id.encode()); time.sleep(0.02)
+                except:
+                    try: client.close()
+                    finally: self.remove(client, room_id)
+            print(f"{user_id} recall {msg_id}")
+        except Exception as e:
+            print("Loi broadcastRecall:", repr(e))
+
+    def handleAck(self, connection, room_id, user_id):
+        try:
+            msg_id = connection.recv(1024).decode(errors="ignore")
+            for client in list(self.rooms[room_id]):
+                try:
+                    client.send(b"READ");          time.sleep(0.02)
+                    client.send(msg_id.encode());  time.sleep(0.02)
+                    client.send(user_id.encode()); time.sleep(0.02)
+                except:
+                    try: client.close()
+                    finally: self.remove(client, room_id)
+        except Exception as e:
+            print("Loi handleAck:", repr(e))
+
 
 
     def broadcast(self, message_to_send, connection, room_id):
