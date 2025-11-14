@@ -25,10 +25,12 @@ class GUI:
         self.msg_widgets = {}        
         self._typing = False
         self._typing_after_id = None
+        self.running = True
 
         self.Window = tk.Tk()
         self.Window.withdraw()
 
+        self.Window.protocol("WM_DELETE_WINDOW", self.on_close)
         self.login = tk.Toplevel()
         self.login.title("UTH-CHAT")
         self.login.resizable(width=False, height=False)
@@ -266,20 +268,21 @@ class GUI:
         self.Window.configure(width=420, height=720, bg="#18191A")
 
         # Header bar
-        header = tk.Frame(self.Window, bg="#242526", height=70)
+        header = tk.Frame(self.Window, bg="#242526", height=68)
         header.place(relwidth=1, relheight=0.09)
 
-        # Avatar
-        avatar = tk.Label(header,
-                         text="👤",
-                         bg="#242526",
-                         fg="white",
-                         font="Helvetica 18")
-        avatar.place(relx=0.04, rely=0.5, anchor="w")
+        avatar = tk.Label(
+            header,
+            text="👤",
+            bg="#242526",
+            fg="white",
+            font=("Helvetica", 18)
+        )
+        avatar.place(relx=0.05, rely=0.5, anchor="w")
 
-        # Name and status
         name_frame = tk.Frame(header, bg="#242526")
-        name_frame.place(relx=0.15, rely=0.5, anchor="w")
+        name_frame.place(relx=0.16, rely=0.5, anchor="w")
+
 
         self.chatBoxHead = tk.Label(name_frame,
                                     bg="#242526",
@@ -327,30 +330,13 @@ class GUI:
                                     justify="left")
         self.userlist_label.pack(anchor="w")
 
-        # Header icons
-        call_icon = tk.Label(header,
-                            text="📞",
-                            bg="#242526",
-                            fg="#10B981",
-                            font="Helvetica 16",
-                            cursor="hand2")
-        call_icon.place(relx=0.72, rely=0.5, anchor="center")
-
-        video_icon = tk.Label(header,
-                             text="🎥",
-                             bg="#242526",
-                             fg="#10B981",
-                             font="Helvetica 16",
-                             cursor="hand2")
-        video_icon.place(relx=0.83, rely=0.5, anchor="center")
-
         minimize_icon = tk.Label(header,
                                 text="─",
                                 bg="#242526",
                                 fg="#B0B3B8",
-                                font="Helvetica 16 bold",
+                                font="Helvetica 14 bold",
                                 cursor="hand2")
-        minimize_icon.place(relx=0.94, rely=0.5, anchor="center")
+        minimize_icon.place(relx=0.96, rely=0.5, anchor="center")
 
         # Chat area với Canvas để vẽ bubble
         chat_bg = tk.Frame(self.Window, bg="#18191A")
@@ -486,6 +472,39 @@ class GUI:
                                    activebackground="#242526",
                                    command=self.sendLike)
         self.buttonMsg.place(relx=0.85, rely=0.7, relheight=0.3, relwidth=0.13, anchor="w")
+
+    def add_system_message(self, text):
+        msg_container = tk.Frame(self.messages_frame, bg="#18191A")
+        msg_container.pack(fill="x", pady=6)
+
+        box = tk.Frame(msg_container, bg="#18191A")
+        box.pack(anchor="center")  # Căn giữa
+
+        bubble = tk.Label(
+            box,
+            text=f"{text}",
+            bg="#3A3B3C",
+            fg="#E4E6EB",
+            font="Helvetica 10 bold",
+            padx=14, pady=10,
+            wraplength=260,
+            justify="center"
+        )
+        bubble.pack()
+
+        time_label = tk.Label(
+            box,
+            text=datetime.now().strftime("%H:%M"),
+            bg="#18191A",
+            fg="#8696A0",
+            font="Helvetica 7"
+        )
+        time_label.pack(anchor="center", pady=(2, 0))
+
+        self.messages_frame.update_idletasks()
+        self.chat_canvas.yview_moveto(1.0)
+
+
 
     def add_message(self, text, is_sent=True, sender_name=None, image_data=None):
         """Thêm tin nhắn vào chat với bubble tròn"""
@@ -664,8 +683,8 @@ class GUI:
             self.server.send(b"RECALL")
             time.sleep(0.02)
             self.server.send(msg_id.encode())
-        except Exception as e:
-            print("Lỗi gửi RECALL:", e)
+        except:
+            pass
         self._remove_msg_widget(msg_id)
 
     def _show_msg_menu(self, widget, msg_id):
@@ -775,7 +794,7 @@ class GUI:
         snd.start()
 
     def receive(self):
-        while True:
+        while self.running:
             try:
                 header = self.server.recv(1024)
                 if not header:
@@ -835,8 +854,8 @@ class GUI:
                             self.server.send(b"ACK")
                             time.sleep(0.02)
                             self.server.send(msg_id.encode())
-                        except Exception as e:
-                            print("ACK error:", e)
+                        except:
+                            pass
 
                     if ttl_ms and ttl_ms > 0 and is_me:
                         self.Window.after(ttl_ms, lambda mid=msg_id: self._recall_msg(mid))
@@ -872,6 +891,11 @@ class GUI:
                 else:
                     message = tag
 
+                    if message.startswith("<Server>"):
+                        clean_msg = message.replace("<Server>", "").strip()
+                        self.add_system_message(clean_msg)
+                        continue
+
                     if "USERLIST" in message:
                         prefix, rest = message.split("USERLIST", 1)
 
@@ -901,24 +925,33 @@ class GUI:
                             end_bracket = message.index(">")
                             sender = message[1:end_bracket]
                             content = message[end_bracket+1:].strip()
-                            self.add_message(content, is_sent=False, sender_name=sender)
+                            if sender == "Server":
+                                self.add_system_message(content)
+                            else:
+                                self.add_message(content, is_sent=False, sender_name=sender)
                         else:
                             self.add_message(message, is_sent=False, sender_name="User")
 
-            except Exception as e:
-                print(f"Có lỗi xảy ra: {e}")
-                self.server.close()
+            except:
+                try:
+                    self.server.close()
+                except:
+                    pass
                 break
 
     def update_userlist(self, users):
-        try:
+        if not hasattr(self, "Window") or not self.Window.winfo_exists():
+            return
+
+        def _do_update():
             if not users:
                 text = f"Phòng {getattr(self, 'room_id', '?')} · 0 online"
             else:
                 text = f"Phòng {getattr(self, 'room_id', '?')} · {len(users)} online: " + ", ".join(users)
             self.userlist_label.config(text=text)
-        except Exception as e:
-            print("update_userlist error:", e)
+
+        self.Window.after(0, _do_update)
+
 
     def show_typing(self, sender, status):
         try:
@@ -1080,6 +1113,16 @@ class GUI:
         self.entryMsg.insert(0, current_text + emoji)
         self.entryMsg.focus()
         window.destroy()
+    def on_close(self):
+        self.running = False
+        try:
+            self.server.close()
+        except:
+            pass
+        try:
+            self.Window.destroy()
+        except:
+            pass
 
 
 if __name__ == "__main__":

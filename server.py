@@ -10,6 +10,24 @@ class Server:
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.usernames = {}
+        self.bad_words = [
+            "dm", "đm", "dmm", "dcm",
+            "vl", "vcl", "ml", "cc",
+
+            "ngu", "đồ ngu",
+            "khùng", "khung",
+            "điên", "thần kinh",
+
+            "mất dạy", "vô học", "láo", "hỗn",
+
+            "do ngu", "mat day", "vo hoc",
+            "dien", "khung", "lao",
+
+            "n gu", "n- gu", "nguuu",
+            "fuck", "bitch"
+]       
+        self.violation_count = {}  
+        self.muted_until = {}    
 
     def accept_connections(self, ip_address, port):
         self.ip_address = ip_address
@@ -76,8 +94,6 @@ class Server:
                     status = raw
                     self.handleTyping(connection, room_id, user_id, status)
 
-
-
                 else:
                     msg = tag
                     if msg:
@@ -87,6 +103,11 @@ class Server:
                         self.remove(connection, room_id)
                         break
 
+            except ConnectionResetError:
+                print(f"{user_id} đã ngắt kết nối (đóng ứng dụng).")
+                self.remove(connection, room_id)
+                break
+            
             except Exception as e:
                 print("Client da ngat ket noi / loi:", repr(e))
                 self.remove(connection, room_id)
@@ -169,35 +190,86 @@ class Server:
             ttl_ms = connection.recv(1024).decode(errors="ignore")
             content_len = int(connection.recv(1024).decode(errors="ignore"))
 
-            for client in list(self.rooms[room_id]):
-                if client is connection:
-                    continue
-                try:
-                    client.send(b"MSG");           time.sleep(0.02)
-                    client.send(msg_id.encode());  time.sleep(0.02)
-                    client.send(ttl_ms.encode());  time.sleep(0.02)
-                    client.send(user_id.encode()); time.sleep(0.02)  
-                    client.send(str(content_len).encode()); time.sleep(0.02)
-                except:
-                    try: client.close()
-                    finally: self.remove(client, room_id)
-
+            full_data = b""
             total = 0
             while total < content_len:
                 chunk = connection.recv(min(4096, content_len - total))
                 if not chunk:
                     break
                 total += len(chunk)
-                for client in list(self.rooms[room_id]):
-                    if client is connection:
-                        continue
+                full_data += chunk
+
+            text = full_data.decode(errors="ignore")
+
+            now = time.time()
+            mute_until = self.muted_until.get(user_id, 0)
+            if mute_until > now:
+                remaining = int(mute_until - now)
+                if remaining < 0:
+                    remaining = 0
+                try:
+                    connection.send(
+                        f"<Server> ⛔ Bạn đang bị chặn gửi tin trong {remaining}s do vi phạm ngôn từ.".encode()
+                    )
+                except:
+                    pass
+                return
+
+            text, violated = self.filter_and_check(text)
+
+            if violated:
+                cnt = self.violation_count.get(user_id, 0) + 1
+                self.violation_count[user_id] = cnt
+
+                if cnt >= 3:
+                    self.muted_until[user_id] = time.time() + 30
+                    self.violation_count[user_id] = 0
+                    warn = "<Server> ⛔ Bạn đã bị tạm khóa gửi tin 30 giây do gửi nhiều tin nhắn không phù hợp."
+                else:
+                    warn = "<Server> ⚠️ Tin nhắn của bạn chứa ngôn từ không phù hợp!"
+
+                try:
+                    connection.send(warn.encode())
+                except:
+                    pass
+
+            clean_bytes = text.encode()
+            clean_len = len(clean_bytes)
+
+            for client in list(self.rooms[room_id]):
+                if client is connection:
+                    continue
+                try:
+                    client.send(b"MSG");                  time.sleep(0.02)
+                    client.send(msg_id.encode());         time.sleep(0.02)
+                    client.send(ttl_ms.encode());         time.sleep(0.02)
+                    client.send(user_id.encode());        time.sleep(0.02)
+                    client.send(str(clean_len).encode()); time.sleep(0.02)
+                    client.send(clean_bytes)
+                except:
                     try:
-                        client.send(chunk)
-                    except:
-                        try: client.close()
-                        finally: self.remove(client, room_id)
+                        client.close()
+                    finally:
+                        self.remove(client, room_id)
+
         except Exception as e:
             print("Loi broadcastMsg:", repr(e))
+
+
+
+    def filter_and_check(self, text):
+        original_lower = text.lower()
+        violated = False
+
+        for w in self.bad_words:
+            if w in original_lower:
+                violated = True
+                text = text.replace(w, "***")
+                text = text.replace(w.upper(), "***")
+                text = text.replace(w.capitalize(), "***")
+
+        return text, violated
+
 
     def broadcastRecall(self, connection, room_id, user_id):
         try:
@@ -274,12 +346,23 @@ class Server:
                     self.remove(client, room_id)
 
     def remove(self, connection, room_id):
-        if connection in self.rooms[room_id]:
+        try:
+            uid = self.usernames.pop(connection, None)
+        except Exception:
+            uid = None
+
+        if room_id in self.rooms and connection in self.rooms[room_id]:
             self.rooms[room_id].remove(connection)
-        if connection in self.usernames:
-            self.usernames.pop(connection, None)
+
         if room_id in self.rooms:
             self.broadcast_userlist(room_id)
+
+        if uid:
+            print(f"{uid} đã rời phòng {room_id}")
+        else:
+            print(f"Một client đã rời phòng {room_id}")
+
+
 
 
 if __name__ == "__main__":
