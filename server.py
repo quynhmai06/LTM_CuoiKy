@@ -9,6 +9,7 @@ class Server:
         self.rooms = df(list)
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.usernames = {}
 
     def accept_connections(self, ip_address, port):
         self.ip_address = ip_address
@@ -34,8 +35,8 @@ class Server:
                 pass
     
     def clientThread(self, connection):
-        user_id = connection.recv(1024).decode().replace("User ", "")
-        room_id = connection.recv(1024).decode().replace("Join ", "")
+        user_id = connection.recv(1024).decode().replace("User ", "").strip()
+        room_id = connection.recv(1024).decode().replace("Join ", "").strip()
 
         if room_id not in self.rooms:
             connection.send("Tao phong moi thanh cong".encode())
@@ -43,6 +44,8 @@ class Server:
             connection.send("Chao mung den phong chat".encode())
 
         self.rooms[room_id].append(connection)
+        self.usernames[connection] = user_id         
+        self.broadcast_userlist(room_id)
 
         while True:
             try:
@@ -60,12 +63,20 @@ class Server:
                     self.broadcastImage(connection, room_id, user_id)
                 elif tag == "MSG":
                     self.broadcastMsg(connection, room_id, user_id)
-
                 elif tag == "RECALL":
                     self.broadcastRecall(connection, room_id, user_id)
-
                 elif tag == "ACK":
                     self.handleAck(connection, room_id, user_id)
+                elif tag.startswith("TYPING"):
+                    raw = tag[len("TYPING"):].strip()
+
+                    if raw == "":
+                        raw = connection.recv(1024).decode(errors="ignore").strip()
+
+                    status = raw
+                    self.handleTyping(connection, room_id, user_id, status)
+
+
 
                 else:
                     msg = tag
@@ -217,6 +228,40 @@ class Server:
         except Exception as e:
             print("Loi handleAck:", repr(e))
 
+    def handleTyping(self, connection, room_id, user_id, status):
+        try:
+            for client in list(self.rooms[room_id]):
+                if client is connection:
+                    continue
+                client.send(b"TYPING")
+                time.sleep(0.02)
+                client.send(user_id.encode())
+                time.sleep(0.02)
+                client.send(status.encode())
+        except Exception as e:
+            print("Loi handleTyping:", repr(e))
+
+
+    def broadcast_userlist(self, room_id):
+        """Gửi danh sách user trong phòng cho tất cả client trong phòng."""
+        try:
+            users = []
+            for conn in self.rooms[room_id]:
+                uid = self.usernames.get(conn, "Unknown")
+                users.append(uid)
+            payload = ",".join(users)
+            for client in list(self.rooms[room_id]):
+                try:
+                    client.send(b"USERLIST");      time.sleep(0.02)
+                    client.send(payload.encode()); time.sleep(0.02)
+                except:
+                    try: client.close()
+                    finally: self.remove(client, room_id)
+            print(f"USERLIST room {room_id}: {payload}")
+        except Exception as e:
+            print("Loi broadcast_userlist:", repr(e))
+
+
 
 
     def broadcast(self, message_to_send, connection, room_id):
@@ -231,6 +276,11 @@ class Server:
     def remove(self, connection, room_id):
         if connection in self.rooms[room_id]:
             self.rooms[room_id].remove(connection)
+        if connection in self.usernames:
+            self.usernames.pop(connection, None)
+        if room_id in self.rooms:
+            self.broadcast_userlist(room_id)
+
 
 if __name__ == "__main__":
     ip_address = "127.0.0.1"

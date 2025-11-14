@@ -23,14 +23,47 @@ welcome_msg = server.recv(1024).decode()
 print(welcome_msg)
 
 def receive():
-    """Thread: nhan tat ca thong diep tu server va xu ly (tin nhan hoac FILE)."""
     while True:
         try:
             message = server.recv(1024)
             if not message:
                 break
-            decoded = message.decode()
-            if decoded == "FILE":
+            decoded = message.decode(errors="ignore")
+
+            if decoded == "MSG":
+                msg_id = server.recv(1024).decode(errors="ignore")
+                ttl_ms = server.recv(1024).decode(errors="ignore")     
+                sender = server.recv(1024).decode(errors="ignore")
+                content_len = int(server.recv(1024).decode(errors="ignore"))
+
+                buf = b""
+                while len(buf) < content_len:
+                    chunk = server.recv(min(4096, content_len - len(buf)))
+                    if not chunk:
+                        break
+                    buf += chunk
+                text = buf.decode(errors="ignore")
+                print(f"<{sender}> {text}")
+
+            elif decoded == "IMAGE":
+                size_str = server.recv(1024).decode(errors="ignore")
+                total_len = int(size_str)
+                sender = server.recv(1024).decode(errors="ignore")
+
+                img_data = b""
+                while len(img_data) < total_len:
+                    chunk = server.recv(min(4096, total_len - len(img_data)))
+                    if not chunk:
+                        break
+                    img_data += chunk
+
+
+                filename = f"image_from_{sender}_{int(time.time())}.bin"
+                with open(filename, "wb") as f:
+                    f.write(img_data)
+                print(f"<{sender}> da gui 1 anh (luu vao {filename})")
+
+            elif decoded == "FILE":
                 file_name = server.recv(1024).decode()
                 lenOfFile = server.recv(1024).decode()
                 send_user = server.recv(1024).decode()
@@ -44,12 +77,37 @@ def receive():
                         data = server.recv(1024)
                         total = total + len(data)
                         f.write(data)
-                print("<" + str(send_user) + "> " + file_name + " da nhan")
+                print(f"<{send_user}> {file_name} da nhan")
+
+            elif decoded.startswith("USERLIST"):
+                rest = decoded[len("USERLIST"):]
+                if not rest:
+                    rest = server.recv(4096).decode(errors="ignore")
+                users = [u.strip() for u in rest.split(",") if u.strip()]
+                print("Nguoi trong phong:", ", ".join(users))
+
+
+            elif decoded == "READ":
+                _msg_id = server.recv(1024).decode(errors="ignore")
+                _reader = server.recv(1024).decode(errors="ignore")
+
+            elif decoded == "RECALL":
+                msg_id = server.recv(1024).decode(errors="ignore")
+                who = server.recv(1024).decode(errors="ignore")
+                print(f"[{who}] da go 1 tin nhan (id {msg_id})")
+
+            elif decoded == "TYPING":
+                sender = server.recv(1024).decode(errors="ignore")
+                status = server.recv(1024).decode(errors="ignore")
+
             else:
                 print(decoded)
+
         except Exception as e:
             print("Loi khi nhan:", repr(e))
             break
+
+
 
 recv_thread = threading.Thread(target=receive, daemon=True)
 recv_thread.start()

@@ -23,6 +23,8 @@ class GUI:
         self.server.connect((ip_address, port))
         self.default_ttl_ms = 0     
         self.msg_widgets = {}        
+        self._typing = False
+        self._typing_after_id = None
 
         self.Window = tk.Tk()
         self.Window.withdraw()
@@ -246,6 +248,7 @@ class GUI:
             return
             
         self.name = username
+        self.room_id = room_id if room_id else "0" 
         self.server.send(str.encode(username))
         time.sleep(0.1)
         self.server.send(str.encode(room_id if room_id != "Nhập mã phòng..." else "0"))
@@ -305,6 +308,24 @@ class GUI:
                                font="Helvetica 8",
                                anchor="w")
         status_label.pack(side="left")
+
+        self.typing_label = tk.Label(status_frame,
+                                text="",
+                                bg="#242526",
+                                fg="#B0B3B8",
+                                font="Helvetica 8 italic",
+                                anchor="w")
+        self.typing_label.pack(side="left", padx=(10, 0))
+
+        self.userlist_label = tk.Label(name_frame,
+                                    text="",
+                                    bg="#242526",
+                                    fg="#B0B3B8",
+                                    font="Helvetica 8",
+                                    anchor="w",
+                                    wraplength=220,
+                                    justify="left")
+        self.userlist_label.pack(anchor="w")
 
         # Header icons
         call_icon = tk.Label(header,
@@ -440,6 +461,7 @@ class GUI:
         self.entryMsg.place(relwidth=0.85, relheight=1, relx=0.04, rely=0)
         self.entryMsg.focus()
         self.entryMsg.bind("<Return>", lambda e: self.sendButton(self.entryMsg.get()))
+        self.entryMsg.bind("<KeyPress>", self.on_typing)
 
         # Emoji in input - có thể click
         emoji_input_btn = tk.Button(input_frame,
@@ -831,8 +853,46 @@ class GUI:
                     if cont and hasattr(cont, "_status_label"):
                         cont._status_label.config(text="Đã xem")
 
+                elif tag.startswith("USERLIST"):
+                    users_str = tag[len("USERLIST"):]
+                    if not users_str:
+                        try:
+                            more = self.server.recv(4096).decode(errors="ignore")
+                            users_str += more
+                        except:
+                            pass
+                    users = [u for u in users_str.split(",") if u]
+                    self.update_userlist(users)
+
+                elif tag == "TYPING":
+                    sender = self.server.recv(1024).decode(errors="ignore")
+                    status = self.server.recv(1024).decode(errors="ignore")
+                    self.show_typing(sender, status)
+
                 else:
                     message = tag
+
+                    if "USERLIST" in message:
+                        prefix, rest = message.split("USERLIST", 1)
+
+                        if prefix.strip():
+                            if prefix.startswith("<Ban>"):
+                                clean_msg = prefix.replace("<Ban>", "").strip()
+                                self.add_message(clean_msg, is_sent=True)
+                            elif prefix.startswith("<") and ">" in prefix:
+                                end_bracket = prefix.index(">")
+                                sender = prefix[1:end_bracket]
+                                content = prefix[end_bracket+1:].strip()
+                                self.add_message(content, is_sent=False, sender_name=sender)
+                            else:
+                                self.add_message(prefix, is_sent=False, sender_name="User")
+
+                        users_str = rest.strip()
+                        if users_str:
+                            users = [u for u in users_str.split(",") if u]
+                            self.update_userlist(users)
+                        continue 
+
                     if message.startswith("<Ban>"):
                         clean_msg = message.replace("<Ban>", "").strip()
                         self.add_message(clean_msg, is_sent=True)
@@ -849,6 +909,31 @@ class GUI:
                 print(f"Có lỗi xảy ra: {e}")
                 self.server.close()
                 break
+
+    def update_userlist(self, users):
+        try:
+            if not users:
+                text = f"Phòng {getattr(self, 'room_id', '?')} · 0 online"
+            else:
+                text = f"Phòng {getattr(self, 'room_id', '?')} · {len(users)} online: " + ", ".join(users)
+            self.userlist_label.config(text=text)
+        except Exception as e:
+            print("update_userlist error:", e)
+
+    def show_typing(self, sender, status):
+        try:
+            if sender == self.name:
+                return 
+
+            if status == "START":
+                self.typing_label.config(text=f"{sender} đang nhập...")
+            else:
+                # STOP -> clear nếu là người đó
+                if self.typing_label.cget("text").startswith(sender):
+                    self.typing_label.config(text="")
+        except Exception as e:
+            print("show_typing error:", e)
+        
 
 
     def sendMessage(self):
@@ -877,17 +962,46 @@ class GUI:
         if self.default_ttl_ms and int(self.default_ttl_ms) > 0:
             self.Window.after(int(self.default_ttl_ms), lambda mid=msg_id: self._recall_msg(mid))
 
+    def on_typing(self, event=None):
+        try:
+            if not self._typing:
+                self._typing = True
+                threading.Thread(target=self._send_typing_start, daemon=True).start()
+
+            if self._typing_after_id:
+                self.Window.after_cancel(self._typing_after_id)
+            self._typing_after_id = self.Window.after(1500, self._send_typing_stop)
+        except:
+            pass
+
+    def _send_typing_start(self):
+        try:
+            self.server.send(b"TYPING")
+            time.sleep(0.02)
+            self.server.send(b"START")
+        except Exception as e:
+            print("Typing START error:", e)
+
+    def _send_typing_stop(self):
+        self._typing = False
+        self._typing_after_id = None
+        try:
+            self.server.send(b"TYPING")
+            time.sleep(0.02)
+            self.server.send(b"STOP")
+        except Exception as e:
+            print("Typing STOP error:", e)
+        
+
 
     def show_emoji_picker(self):
         """Hiển thị bảng chọn emoji"""
-        # Tạo cửa sổ emoji picker
         emoji_window = tk.Toplevel(self.Window)
         emoji_window.title("Chọn Emoji")
         emoji_window.geometry("380x320")
         emoji_window.configure(bg="#242526")
         emoji_window.resizable(False, False)
         
-        # Header
         header = tk.Label(emoji_window,
                          text="😊 Chọn Emoji",
                          font="Helvetica 12 bold",
