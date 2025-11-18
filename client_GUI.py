@@ -27,6 +27,13 @@ class GUI:
         self.msg_widgets = {}         # msg_id -> widget container
         self.msg_meta = {}            # msg_id -> {"text": ..., "sender": ...}
         self.reactions = {}           # msg_id -> {username: emoji}
+        
+        # search state
+        self.search_results = []      # list các msg_id match
+        self.current_search_index = -1
+        self.last_search_query = ""
+        self.last_highlight_msg_id = None
+
 
         # state reply
         self.reply_to_msg_id = None
@@ -383,6 +390,22 @@ class GUI:
             cursor="hand2",
         )
         minimize_icon.place(relx=0.96, rely=0.5, anchor="center")
+        
+                # Search icon mở popup tìm kiếm tin nhắn
+        search_icon = tk.Label(
+            header,
+            text="🔍",
+            bg="#242526",
+            fg="#B0B3B8",
+            font="Helvetica 14",
+            cursor="hand2",
+        )
+        search_icon.place(relx=0.86, rely=0.5, anchor="center")
+        search_icon.bind("<Button-1>", lambda e: self.open_search_popup())
+
+        # Phím tắt Ctrl+F để mở search
+        self.Window.bind("<Control-f>", lambda e: self.open_search_popup())
+
 
         # Chat area
         chat_bg = tk.Frame(self.Window, bg="#18191A")
@@ -1683,6 +1706,219 @@ class GUI:
             self.Window.destroy()
         except:
             pass
+        
+    def open_search_popup(self):
+        # Nếu popup đã mở rồi thì bring lên
+        if hasattr(self, "search_popup") and self.search_popup.winfo_exists():
+            self.search_popup.lift()
+            return
+
+        self.search_popup = tk.Toplevel(self.Window)
+        self.search_popup.title("Tìm kiếm tin nhắn")
+        self.search_popup.configure(bg="#242526")
+        self.search_popup.resizable(False, False)
+
+        # Đặt vị trí gần cửa sổ chính
+        x = self.Window.winfo_x() + 40
+        y = self.Window.winfo_y() + 80
+        self.search_popup.geometry(f"+{x}+{y}")
+
+        tk.Label(
+            self.search_popup,
+            text="Nhập từ khóa:",
+            bg="#242526",
+            fg="white",
+            font="Helvetica 10",
+        ).pack(padx=10, pady=(10, 4), anchor="w")
+
+        self.search_entry = tk.Entry(
+            self.search_popup,
+            bg="#3A3B3C",
+            fg="#E4E6EB",
+            font="Helvetica 10",
+            border=0,
+            insertbackground="#10B981",
+            width=40,
+        )
+        self.search_entry.pack(padx=10, pady=(0, 8), fill="x")
+        self.search_entry.focus()
+
+        btn_frame = tk.Frame(self.search_popup, bg="#242526")
+        btn_frame.pack(padx=10, pady=(0, 8), fill="x")
+
+        # Tìm từ đầu (reset)
+        tk.Button(
+            btn_frame,
+            text="Tìm",
+            bg="#10B981",
+            fg="white",
+            font="Helvetica 9 bold",
+            border=0,
+            cursor="hand2",
+            activebackground="#059669",
+            command=lambda: self.do_search(reset=True),
+        ).pack(side="left", padx=(0, 5))
+
+        # Tìm kết quả tiếp theo
+        tk.Button(
+            btn_frame,
+            text="Tiếp theo",
+            bg="#3A3B3C",
+            fg="#E4E6EB",
+            font="Helvetica 9",
+            border=0,
+            cursor="hand2",
+            activebackground="#4B4D50",
+            command=lambda: self.do_search(reset=False),
+        ).pack(side="left")
+
+        tk.Button(
+            btn_frame,
+            text="Đóng",
+            bg="#3A3B3C",
+            fg="#E4E6EB",
+            font="Helvetica 9",
+            border=0,
+            cursor="hand2",
+            activebackground="#4B4D50",
+            command=self.search_popup.destroy,
+        ).pack(side="right")
+
+        self.search_status = tk.Label(
+            self.search_popup,
+            text="",
+            bg="#242526",
+            fg="#9CA3AF",
+            font="Helvetica 8",
+            anchor="w",
+            justify="left",
+        )
+        self.search_status.pack(padx=10, pady=(0, 10), fill="x")
+
+        # Enter = tìm từ đầu
+        self.search_entry.bind("<Return>", lambda e: self.do_search(reset=True))
+
+    def do_search(self, reset=True):
+        if not hasattr(self, "search_entry"):
+            return
+
+        query = self.search_entry.get().strip()
+        if not query:
+            self.search_status.config(text="Nhập từ khóa để tìm kiếm.")
+            return
+
+        q_lower = query.lower()
+
+        # Nếu reset hoặc đổi từ khóa mới -> build lại danh sách kết quả
+        if reset or query != self.last_search_query:
+            self.last_search_query = query
+            self._clear_search_highlight()
+            self.search_results = []
+
+            # msg_meta: msg_id -> {"text": ..., "sender": ...}
+            for msg_id, meta in self.msg_meta.items():
+                text = (meta.get("text") or "").lower()
+                sender = (meta.get("sender") or "").lower()
+                if q_lower in text or q_lower in sender:
+                    self.search_results.append(msg_id)
+
+            self.current_search_index = -1
+
+        if not self.search_results:
+            self.search_status.config(text="❌ Không tìm thấy kết quả nào.")
+            return
+
+        # Nhảy sang kết quả tiếp theo (vòng tròn)
+        self.current_search_index = (self.current_search_index + 1) % len(self.search_results)
+        mid = self.search_results[self.current_search_index]
+
+        cont = self.msg_widgets.get(mid)
+        if not cont:
+            self.search_status.config(
+                text=f"Kết quả {self.current_search_index + 1}/{len(self.search_results)} (tin nhắn không còn trong UI)."
+            )
+            return
+
+        # Clear highlight cũ, highlight tin mới
+        self._clear_search_highlight()
+        self._highlight_message_container(cont)
+        self.last_highlight_msg_id = mid
+
+        # Scroll tới tin nhắn
+        self._scroll_to_widget(cont)
+
+        self.search_status.config(
+            text=f"✅ Kết quả {self.current_search_index + 1}/{len(self.search_results)}"
+        )
+
+    def _scroll_to_widget(self, widget):
+        """
+        Scroll canvas để đưa message container vào giữa màn hình chat.
+        """
+        try:
+            self.messages_frame.update_idletasks()
+
+            # toạ độ tương đối của widget trong messages_frame
+            y = widget.winfo_y()
+            total_height = self.messages_frame.winfo_height()
+            if total_height <= 0:
+                return
+
+            # vị trí tương đối (0.0 -> top, 1.0 -> bottom)
+            frac = y / max(total_height, 1)
+            # dịch xuống chút để nằm giữa
+            frac = max(0.0, min(frac, 1.0))
+            self.chat_canvas.yview_moveto(frac)
+        except Exception as e:
+            print("Scroll error:", e)
+
+    def _highlight_message_container(self, container):
+        """
+        Đổi màu nền message container để dễ nhìn thấy kết quả search.
+        """
+        try:
+            # Frame ngoài
+            container._old_bg = container.cget("bg")
+            container.config(bg="#2F3136")
+
+            # Tô nhẹ tất cả label/frame con có nền giống chat
+            for child in container.winfo_children():
+                if isinstance(child, (tk.Frame, tk.Label)):
+                    bg = child.cget("bg")
+                    if bg in ("#18191A", "#242526", "#3E4042", "#10B981", "#1f2122", "#2a2c2f"):
+                        child._old_bg = bg
+                        child.config(bg="#2F3136")
+        except Exception as e:
+            print("Highlight error:", e)
+
+    def _clear_search_highlight(self):
+        """
+        Bỏ highlight của kết quả search trước đó.
+        """
+        if not self.last_highlight_msg_id:
+            return
+
+        cont = self.msg_widgets.get(self.last_highlight_msg_id)
+        if not cont:
+            self.last_highlight_msg_id = None
+            return
+
+        try:
+            # restore frame ngoài
+            if hasattr(cont, "_old_bg"):
+                cont.config(bg=cont._old_bg)
+                del cont._old_bg
+
+            # restore tất cả child đã bị đổi màu
+            for child in cont.winfo_children():
+                if hasattr(child, "_old_bg"):
+                    child.config(bg=child._old_bg)
+                    del child._old_bg
+        except Exception as e:
+            print("Clear highlight error:", e)
+
+        self.last_highlight_msg_id = None
+
 
 
 if __name__ == "__main__":
