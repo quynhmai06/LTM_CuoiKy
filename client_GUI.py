@@ -23,7 +23,16 @@ class GUI:
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server.connect((ip_address, port))
         self.default_ttl_ms = 0
-        self.msg_widgets = {}
+
+        self.msg_widgets = {}         # msg_id -> widget container
+        self.msg_meta = {}            # msg_id -> {"text": ..., "sender": ...}
+        self.reactions = {}           # msg_id -> {username: emoji}
+
+        # state reply
+        self.reply_to_msg_id = None
+        self.reply_to_sender = None
+        self.reply_to_preview = None
+
         self._typing = False
         self._typing_after_id = None
         self.running = True
@@ -276,6 +285,7 @@ class GUI:
 
         self.name = username.strip()
         self.room_id = room_id if room_id else "0"
+        # handshake
         self.server.send(self.name.encode())
         time.sleep(0.1)
         self.server.send(
@@ -479,6 +489,17 @@ class GUI:
             command=self.sendFile,
         )
 
+        # LABEL hiển thị đang reply
+        self.reply_label = tk.Label(
+            action_frame,
+            text="",
+            bg="#242526",
+            fg="#10B981",
+            font="Helvetica 8 italic",
+            anchor="w",
+        )
+        self.reply_label.place(relx=0.58, rely=0.15, anchor="w")
+
         input_frame = tk.Frame(bottom_bar, bg="#3A3B3C")
         input_frame.place(relx=0.03, relwidth=0.78, rely=0.45, relheight=0.5)
 
@@ -556,7 +577,8 @@ class GUI:
         self.chat_canvas.yview_moveto(1.0)
 
     def add_message(self, text, is_sent=True, sender_name=None,
-                    image_data=None, time_override=None):
+                    image_data=None, time_override=None,
+                    reply_preview=None, reply_sender=None):
         msg_container = tk.Frame(self.messages_frame, bg="#18191A")
         msg_container.pack(fill="x", pady=5, padx=10)
 
@@ -568,6 +590,37 @@ class GUI:
 
             content_frame = tk.Frame(bubble_frame, bg="#18191A")
             content_frame.pack(side="right")
+
+            # quote khi reply (tin mình)
+            if reply_preview:
+                reply_box = tk.Frame(content_frame, bg="#18191A")
+                reply_box.pack(side="top", anchor="e", pady=(0, 2))
+
+                inner = tk.Frame(reply_box, bg="#1f2122")
+                inner.pack(side="right", anchor="e")
+
+                if reply_sender:
+                    sender_lbl = tk.Label(
+                        inner,
+                        text=reply_sender,
+                        bg="#1f2122",
+                        fg="#10B981",
+                        font="Helvetica 8 bold",
+                        anchor="w",
+                    )
+                    sender_lbl.pack(fill="x", padx=6, pady=(4, 0))
+
+                preview_lbl = tk.Label(
+                    inner,
+                    text=reply_preview,
+                    bg="#1f2122",
+                    fg="#E4E6EB",
+                    font="Helvetica 8",
+                    anchor="w",
+                    wraplength=220,
+                    justify="left",
+                )
+                preview_lbl.pack(fill="x", padx=6, pady=(0, 4))
 
             if image_data:
                 try:
@@ -655,6 +708,37 @@ class GUI:
                 )
                 name_label.pack(anchor="w", padx=(0, 0))
 
+            # quote khi reply (người khác)
+            if reply_preview:
+                reply_box = tk.Frame(text_container, bg="#18191A")
+                reply_box.pack(anchor="w", pady=(0, 2))
+
+                inner = tk.Frame(reply_box, bg="#2a2c2f")
+                inner.pack(anchor="w")
+
+                if reply_sender:
+                    sender_lbl = tk.Label(
+                        inner,
+                        text=reply_sender,
+                        bg="#2a2c2f",
+                        fg="#10B981",
+                        font="Helvetica 8 bold",
+                        anchor="w",
+                    )
+                    sender_lbl.pack(fill="x", padx=6, pady=(4, 0))
+
+                preview_lbl = tk.Label(
+                    inner,
+                    text=reply_preview,
+                    bg="#2a2c2f",
+                    fg="#E4E6EB",
+                    font="Helvetica 8",
+                    anchor="w",
+                    wraplength=220,
+                    justify="left",
+                )
+                preview_lbl.pack(fill="x", padx=6, pady=(0, 4))
+
             if image_data:
                 try:
                     img = Image.open(io.BytesIO(image_data))
@@ -714,6 +798,8 @@ class GUI:
     def _attach_msg_id(self, container, msg_id):
         container._msg_id = msg_id
         self.msg_widgets[msg_id] = container
+        # gắn luôn menu chuột phải cho mọi tin nhắn
+        self._bind_right_click(container, msg_id)
 
     def _remove_msg_widget(self, msg_id):
         w = self.msg_widgets.pop(msg_id, None)
@@ -727,12 +813,117 @@ class GUI:
         if not msg_id:
             return
         try:
-            self.server.send(b"RECALL")
+            self._safe_send(b"RECALL")
             time.sleep(0.02)
-            self.server.send(msg_id.encode())
+            self._safe_send(msg_id.encode())
         except:
             pass
         self._remove_msg_widget(msg_id)
+
+    def _apply_reaction(self, msg_id, reaction, sender):
+        """
+        Cập nhật reaction cho 1 msg_id, kèm theo tên người react.
+        self.reactions[msg_id] = { username: emoji }
+        """
+        if not sender:
+            return
+
+        msg_map = self.reactions.setdefault(msg_id, {})
+
+        if not reaction:   # nếu sau này muốn support bỏ reaction thì dùng
+            msg_map.pop(sender, None)
+        else:
+            msg_map[sender] = reaction
+
+        cont = self.msg_widgets.get(msg_id)
+        if not cont:
+            return
+
+        if not msg_map:
+            if hasattr(cont, "_reaction_label"):
+                try:
+                    cont._reaction_label.destroy()
+                except:
+                    pass
+                del cont._reaction_label
+            return
+
+        counts = {}
+        for emo in msg_map.values():
+            counts[emo] = counts.get(emo, 0) + 1
+
+        best_emoji = None
+        best_cnt = 0
+        for emo, c in counts.items():
+            if c > best_cnt:
+                best_emoji, best_cnt = emo, c
+
+        if not best_emoji:
+            return
+
+        label_text = best_emoji if best_cnt == 1 else f"{best_emoji} x{best_cnt}"
+
+        if not hasattr(cont, "_reaction_label"):
+            side = "right"
+            anchor = "e"
+            if hasattr(cont, "_is_sent") and not cont._is_sent:
+                side = "left"
+                anchor = "w"
+
+            lbl = tk.Label(
+                cont,
+                text=label_text,
+                bg="#18191A",
+                fg="#FBBF24",
+                font="Helvetica 10 bold",
+                cursor="hand2",
+            )
+            lbl.pack(side=side, anchor=anchor, padx=6, pady=(0, 2))
+            cont._reaction_label = lbl
+
+            # Bấm vào emoji để xem ai đã react
+            lbl.bind(
+                "<Button-1>",
+                lambda e, mid=msg_id: self._show_reaction_view(mid),
+            )
+        else:
+            cont._reaction_label.config(text=label_text)
+
+    def _show_reaction_view(self, msg_id):
+        """
+        Hiển thị popup nhỏ liệt kê ai đã react gì cho msg_id.
+        """
+        msg_map = self.reactions.get(msg_id)
+        if not msg_map:
+            return
+
+        lines = [f"{user}: {emo}" for user, emo in msg_map.items()]
+        text = "\n".join(lines)
+
+        popup = tk.Toplevel(self.Window)
+        popup.title("Reaction")
+        popup.configure(bg="#242526")
+        popup.resizable(False, False)
+
+        label = tk.Label(
+            popup,
+            text=text,
+            bg="#242526",
+            fg="white",
+            font="Helvetica 9",
+            justify="left",
+            padx=10,
+            pady=8,
+        )
+        label.pack()
+
+        # đặt vị trí gần con trỏ chuột
+        x = self.Window.winfo_pointerx() + 10
+        y = self.Window.winfo_pointery() + 10
+        popup.geometry(f"+{x}+{y}")
+
+        # tự đóng sau 3 giây
+        popup.after(3000, popup.destroy)
 
     def _show_msg_menu(self, widget, msg_id):
         menu = tk.Menu(self.Window, tearoff=0)
@@ -742,6 +933,28 @@ class GUI:
             activebackground="#10B981",
             activeforeground="white",
         )
+
+        menu.add_command(
+            label="↩  Trả lời tin nhắn",
+            command=lambda mid=msg_id: self._start_reply(mid),
+        )
+
+        # ====== SUBMENU REACTION ======
+        react_menu = tk.Menu(
+            menu,
+            tearoff=0,
+            bg="#2f3136",
+            fg="white",
+            activebackground="#10B981",
+            activeforeground="white",
+        )
+        for emo in ["👍", "❤️", "😆", "😢", "😮"]:
+            react_menu.add_command(
+                label=emo,
+                command=lambda e=emo, mid=msg_id: self._send_react(mid, e),
+            )
+        menu.add_cascade(label="✨ Reaction", menu=react_menu)
+        # ==============================
 
         menu.add_command(
             label="🗑️  Gỡ tin nhắn",
@@ -778,6 +991,29 @@ class GUI:
         for ch in widget.winfo_children():
             self._bind_right_click(ch, msg_id)
 
+    # ====== HÀM BẮT ĐẦU / HỦY REPLY ======
+    def _start_reply(self, msg_id):
+        meta = self.msg_meta.get(msg_id)
+        if not meta:
+            return
+        self.reply_to_msg_id = msg_id
+        self.reply_to_sender = meta.get("sender", "")
+        full_text = meta.get("text", "")
+        preview = full_text if len(full_text) <= 40 else full_text[:37] + "..."
+        self.reply_to_preview = preview
+
+        self.reply_label.config(
+            text=f"↩ Đang trả lời {self.reply_to_sender}: {preview}   (bấm để hủy)"
+        )
+        self.reply_label.bind("<Button-1>", lambda e: self._cancel_reply())
+
+    def _cancel_reply(self):
+        self.reply_to_msg_id = None
+        self.reply_to_sender = None
+        self.reply_to_preview = None
+        self.reply_label.config(text="")
+    # ==========================================
+
     def browseFile(self):
         self.filename = filedialog.askopenfilename(
             initialdir="/",
@@ -808,24 +1044,24 @@ class GUI:
         is_image = file_ext in [".png", ".jpg", ".jpeg", ".gif", ".bmp"]
 
         if is_image:
-            self.server.send(b"IMAGE")
+            self._safe_send(b"IMAGE")
             time.sleep(0.05)
 
             with open(self.filename, "rb") as img_file:
                 img_data = img_file.read()
-                self.server.send(str(len(img_data)).encode())
+                self._safe_send(str(len(img_data)).encode())
                 time.sleep(0.05)
-                self.server.send(img_data)
+                self._safe_send(img_data)
 
             with open(self.filename, "rb") as img_file:
                 self.add_message("", is_sent=True, image_data=img_file.read())
         else:
-            self.server.send(b"FILE")
+            self._safe_send(b"FILE")
             time.sleep(0.05)
             basename = os.path.basename(self.filename)
-            self.server.send(("client_" + basename).encode())
+            self._safe_send(("client_" + basename).encode())
             time.sleep(0.05)
-            self.server.send(str(os.path.getsize(self.filename)).encode())
+            self._safe_send(str(os.path.getsize(self.filename)).encode())
             time.sleep(0.05)
 
             with open(self.filename, "rb") as f:
@@ -833,7 +1069,7 @@ class GUI:
                     data = f.read(4096)
                     if not data:
                         break
-                    self.server.send(data)
+                    self._safe_send(data)
             self.add_message("📄 " + basename, is_sent=True)
 
         self.fileLocation.configure(text="")
@@ -843,7 +1079,7 @@ class GUI:
         if msg.strip():
             if msg.startswith("/ttl "):
                 parts = msg.split(" ", 2)
-                if len(parts) >= 3 and parts[1].isdigit():
+                if len(parts) >= 3 and len(parts[1]) and parts[1].isdigit():
                     self.default_ttl_ms = int(parts[1]) * 1000
                     self.msg = parts[2]
                 else:
@@ -861,79 +1097,107 @@ class GUI:
         snd = threading.Thread(target=self.sendMessage, daemon=True)
         snd.start()
 
+    def _safe_send(self, data: bytes):
+        if not self.running:
+            return
+        try:
+            self.server.send(data)
+        except:
+            pass
+
+    def _send_react(self, msg_id, emoji):
+        """
+        Gửi gói REACT lên server:
+        REACT
+        <msg_id>
+        <emoji>
+        """
+        try:
+            self._safe_send(b"REACT")
+            time.sleep(0.02)
+            self._safe_send(msg_id.encode())
+            time.sleep(0.02)
+            self._safe_send(emoji.encode("utf-8"))
+        except Exception as e:
+            print("Send REACT error:", e)
+
+        # Cập nhật ngay trên UI của chính mình cho mượt
+        self._apply_reaction(msg_id, emoji, self.name)
+
+    def sendMessage(self):
+        if not self.running:
+            return
+
+        content = getattr(self, "msg", "").strip()
+        if not content:
+            return
+
+        msg_id = self._new_msg_id()
+        content_bytes = content.encode("utf-8")
+        reply_to = self.reply_to_msg_id
+
+        try:
+            if reply_to:
+                # ===== REPLY =====
+                self._safe_send(b"REPLY")
+                time.sleep(0.02)
+                self._safe_send(reply_to.encode())
+                time.sleep(0.02)
+                self._safe_send(msg_id.encode())
+                time.sleep(0.02)
+                self._safe_send(str(len(content_bytes)).encode())
+                time.sleep(0.02)
+                self._safe_send(content_bytes)
+            else:
+                # ===== MSG THƯỜNG =====
+                ttl_ms = str(self.default_ttl_ms)
+
+                self._safe_send(b"MSG")
+                time.sleep(0.02)
+                self._safe_send(msg_id.encode())
+                time.sleep(0.02)
+                self._safe_send(ttl_ms.encode())
+                time.sleep(0.02)
+                self._safe_send(str(len(content_bytes)).encode())
+                time.sleep(0.02)
+                self._safe_send(content_bytes)
+
+        except Exception as e:
+            print("Lỗi gửi tin:", e)
+            return
+
+        # ===== HIỂN THỊ LOCAL UI =====
+        if reply_to:
+            preview = self.reply_to_preview or ""
+            sender = self.reply_to_sender or ""
+            container = self.add_message(
+                content,
+                is_sent=True,
+                reply_preview=preview,
+                reply_sender=sender,
+            )
+            self._cancel_reply()
+        else:
+            container = self.add_message(content, is_sent=True)
+
+        container._is_sent = True
+
+        self._attach_msg_id(container, msg_id)
+        self.msg_meta[msg_id] = {"text": content, "sender": self.name}
+
+        if (not reply_to) and self.default_ttl_ms and int(self.default_ttl_ms) > 0:
+            self.Window.after(
+                int(self.default_ttl_ms),
+                lambda mid=msg_id: self._recall_msg(mid)
+            )
+
     def receive(self):
         while self.running:
             try:
                 header = self.server.recv(1024)
                 if not header:
                     break
-                tag = header.decode(errors="ignore")
-
-                # ========== LỊCH SỬ PHÒNG (client cũ) ==========
-                if "Lich su phong chat" in tag:
-                    # nếu trước đó server có gửi thêm text -> coi như system
-                    prefix = tag.split("Lich su phong chat", 1)[0].strip()
-                    if prefix:
-                        self.add_system_message(prefix)
-
-                    history_data = tag.split("Lich su phong chat", 1)[1]
-
-                    # hút thêm phần còn lại của block lịch sử
-                    self.server.settimeout(0.2)
-                    try:
-                        while True:
-                            part = self.server.recv(4096).decode(errors="ignore")
-                            if not part:
-                                break
-                            history_data += part
-                    except:
-                        pass
-                    finally:
-                        self.server.settimeout(None)
-
-                    for line in history_data.splitlines():
-                        if "]" in line and "(" in line and "):" in line:
-                            try:
-                                # [ts] user (type): content
-                                ts_end = line.find("]")
-                                ts_str = line[1:ts_end].strip()
-
-                                rest = line[ts_end + 1:].strip()
-                                name = rest.split("(", 1)[0].strip()
-                                typ = rest.split("(", 1)[1].split(")", 1)[0].strip().lower()
-                                content = rest.split("):", 1)[1].strip()
-                            except:
-                                continue
-
-                            # map type -> hiển thị
-                            display_text = content
-                            image_data = None
-
-                            if typ == "file":
-                                display_text = f"📄 {content}"
-                            elif typ == "image":
-                                # không có binary nên chỉ hiển thị placeholder
-                                display_text = f"📷 Ảnh ({content})"
-
-                            # parse giờ từ ts để hiện đúng thời gian
-                            time_override = None
-                            try:
-                                dt = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
-                                time_override = dt.strftime("%H:%M")
-                            except:
-                                pass
-
-                            is_sent = (name == getattr(self, "name", ""))
-                            self.add_message(
-                                display_text,
-                                is_sent=is_sent,
-                                sender_name=None if is_sent else name,
-                                image_data=image_data,
-                                time_override=time_override,
-                            )
-                    # xong block lịch sử → sang vòng lặp kế tiếp
-                    continue
-                # ===============================================
+                tag = header.decode(errors="ignore").strip()
 
                 # ẢNH
                 if tag == "IMAGE":
@@ -943,9 +1207,7 @@ class GUI:
 
                     img_data = b""
                     while len(img_data) < total_len:
-                        chunk = self.server.recv(
-                            min(4096, total_len - len(img_data))
-                        )
+                        chunk = self.server.recv(min(4096, total_len - len(img_data)))
                         if not chunk:
                             break
                         img_data += chunk
@@ -966,9 +1228,7 @@ class GUI:
                     total = 0
                     with open(file_name, "wb") as file:
                         while total < lenOfFile:
-                            data = self.server.recv(
-                                min(4096, lenOfFile - total)
-                            )
+                            data = self.server.recv(min(4096, lenOfFile - total))
                             if not data:
                                 break
                             total += len(data)
@@ -980,7 +1240,7 @@ class GUI:
                         sender_name=(None if send_user == self.name else send_user),
                     )
 
-                # MSG (cả realtime + history với msg_id bắt đầu HIST_)
+                # MSG
                 elif tag == "MSG":
                     msg_id = self.server.recv(1024).decode()
                     ttl_ms = int(self.server.recv(1024).decode())
@@ -989,52 +1249,83 @@ class GUI:
 
                     buf = b""
                     while len(buf) < content_len:
-                        chunk = self.server.recv(
-                            min(4096, content_len - len(buf))
-                        )
+                        chunk = self.server.recv(min(4096, content_len - len(buf)))
                         if not chunk:
                             break
                         buf += chunk
                     text = buf.decode(errors="ignore")
 
                     is_me = (sender == self.name)
-                    is_history = msg_id.startswith("HIST_")
-
-                    time_override = None
-                    if is_history:
-                        try:
-                            parts = msg_id.split("_")
-                            if len(parts) >= 2:
-                                ts_ms = int(parts[1])
-                                time_override = datetime.fromtimestamp(
-                                    ts_ms / 1000.0
-                                ).strftime("%H:%M")
-                        except Exception:
-                            time_override = None
+                    is_history = (ttl_ms < 0)   # TTL = -1 => history
 
                     container = self.add_message(
                         text,
                         is_sent=is_me,
                         sender_name=(None if is_me else sender),
-                        time_override=time_override,
                     )
 
-                    # history: không ACK, không TTL, không recall
-                    if not is_history:
-                        self._attach_msg_id(container, msg_id)
+                    container._is_sent = is_me
+                    self._attach_msg_id(container, msg_id)
+                    self.msg_meta[msg_id] = {"text": text, "sender": sender}
 
-                        if not is_me:
-                            try:
-                                self.server.send(b"ACK")
-                                time.sleep(0.02)
-                                self.server.send(msg_id.encode())
-                            except:
-                                pass
+                    # Chỉ gửi ACK / TTL cho tin realtime
+                    if (not is_history) and (not is_me):
+                        try:
+                            self._safe_send(b"ACK")
+                            time.sleep(0.02)
+                            self._safe_send(msg_id.encode())
+                        except:
+                            pass
 
-                        if ttl_ms and ttl_ms > 0 and is_me:
-                            self.Window.after(
-                                ttl_ms, lambda mid=msg_id: self._recall_msg(mid)
-                            )
+                    if (not is_history) and ttl_ms and ttl_ms > 0 and is_me:
+                        self.Window.after(
+                            ttl_ms, lambda mid=msg_id: self._recall_msg(mid)
+                        )
+
+                # REPLY
+                elif tag == "REPLY":
+                    reply_to_id = self.server.recv(1024).decode(errors="ignore").strip()
+                    msg_id = self.server.recv(1024).decode(errors="ignore").strip()
+                    sender = self.server.recv(1024).decode(errors="ignore").strip()
+                    content_len = int(self.server.recv(1024).decode(errors="ignore").strip())
+
+                    buf = b""
+                    while len(buf) < content_len:
+                        chunk = self.server.recv(min(4096, content_len - len(buf)))
+                        if not chunk:
+                            break
+                        buf += chunk
+                    text = buf.decode(errors="ignore")
+
+                    is_me = (sender == self.name)
+
+                    meta = self.msg_meta.get(reply_to_id)
+                    if meta:
+                        preview_text = meta.get("text", "")
+                        preview_sender = meta.get("sender", "")
+                        if len(preview_text) > 40:
+                            preview_text = preview_text[:37] + "..."
+                    else:
+                        preview_text = "(Tin nhắn không còn hoặc ở phiên khác)"
+                        preview_sender = ""
+
+                    container = self.add_message(
+                        text,
+                        is_sent=is_me,
+                        sender_name=(None if is_me else sender),
+                        reply_preview=preview_text,
+                        reply_sender=preview_sender,
+                    )
+                    container._is_sent = is_me
+                    self._attach_msg_id(container, msg_id)
+                    self.msg_meta[msg_id] = {"text": text, "sender": sender}
+
+                # REACT
+                elif tag == "REACT":
+                    msg_id = self.server.recv(1024).decode(errors="ignore").strip()
+                    sender = self.server.recv(1024).decode(errors="ignore").strip()
+                    reaction = self.server.recv(1024).decode(errors="ignore")
+                    self._apply_reaction(msg_id, reaction, sender)
 
                 # RECALL
                 elif tag == "RECALL":
@@ -1042,47 +1333,170 @@ class GUI:
                     _sender = self.server.recv(1024).decode()
                     self._remove_msg_widget(msg_id)
 
-                # READ
-                elif tag == "READ":
-                    msg_id = self.server.recv(1024).decode()
-                    reader = self.server.recv(1024).decode()
+                # READ (có thể dính msg_id)
+                elif tag.startswith("READ"):
+                    rest = tag[len("READ"):].strip()
+                    if rest:
+                        msg_id = rest
+                    else:
+                        msg_id = self.server.recv(1024).decode(errors="ignore").strip()
+                    reader = self.server.recv(1024).decode(errors="ignore").strip()
+
                     cont = self.msg_widgets.get(msg_id)
                     if cont and hasattr(cont, "_status_label"):
                         cont._status_label.config(text="Đã xem")
+                    continue
 
-                # USERLIST (format: length + payload)
-                elif tag == "USERLIST":
-                    length_str = self.server.recv(1024).decode(errors="ignore")
-                    try:
-                        payload_len = int(length_str)
-                    except ValueError:
-                        # fallback rất hiếm khi length không phải số
-                        users_str = length_str.strip()
-                        users = [u for u in users_str.split(",") if u]
-                        self.update_userlist(users)
-                        continue
+                # USERLIST
+                elif tag.startswith("USERLIST"):
+                    after = tag[len("USERLIST"):].strip()
 
-                    buf = b""
-                    while len(buf) < payload_len:
-                        chunk = self.server.recv(
-                            min(4096, payload_len - len(buf))
-                        )
-                        if not chunk:
+                    # 1) Trường hợp server gửi "USERLISTthanhdat,quan,nam"
+                    if after:
+                        users_str = after
+                    else:
+                        # 2) Trường hợp server gửi: "USERLIST" + \n + length + \n + payload
+                        length_str = self.server.recv(1024).decode(errors="ignore")
+                        try:
+                            payload_len = int(length_str)
+                            buf = b""
+                            while len(buf) < payload_len:
+                                chunk = self.server.recv(
+                                    min(4096, payload_len - len(buf))
+                                )
+                                if not chunk:
+                                    break
+                                buf += chunk
+                            users_str = buf.decode(errors="ignore")
+                        except ValueError:
+                            # Bị dính luôn payload vào length_str, hoặc server cũ
+                            users_str = length_str.strip()
+
+                    # --- Làm sạch: cắt bỏ phần dính thêm header khác (MSG, REPLY, ...) ---
+                    for marker in ["MSG", "REPLY", "IMAGE", "FILE",
+                                   "USERLIST", "READ", "REACT",
+                                   "TYPING", "ACK", "RECALL"]:
+                        idx = users_str.find(marker)
+                        if idx > 0:
+                            users_str = users_str[:idx]
                             break
-                        buf += chunk
-                    users_str = buf.decode(errors="ignore")
-                    users = [u for u in users_str.split(",") if u]
+
+                    users_str = users_str.strip()
+                    if users_str:
+                        users = [u for u in users_str.split(",") if u]
+                    else:
+                        users = []
+
                     self.update_userlist(users)
 
                 # TYPING
-                elif tag == "TYPING":
-                    sender = self.server.recv(1024).decode(errors="ignore")
-                    status = self.server.recv(1024).decode(errors="ignore")
+                elif tag.startswith("TYPING"):
+                    # xử lý cả "TYPING" và "TYPINGquan" / "TYPING quan START"
+                    stripped = tag.strip()
+                    rest = stripped[len("TYPING"):].strip()
+
+                    if rest:
+                        # có sẵn 1 phần/ cả sender trong gói đầu
+                        parts = rest.split()
+                        sender = parts[0]
+                        if len(parts) > 1:
+                            # hiếm khi status cũng dính chung luôn, vẫn xử lý được
+                            status = parts[1]
+                        else:
+                            # chỉ có sender, đọc tiếp status từ server
+                            status = self.server.recv(1024).decode(errors="ignore")
+                    else:
+                        # gói đẹp, "TYPING" riêng → đọc 2 gói tiếp theo
+                        sender = self.server.recv(1024).decode(errors="ignore")
+                        status = self.server.recv(1024).decode(errors="ignore")
+
                     self.show_typing(sender, status)
 
-                # MỌI THỨ CÒN LẠI (server text, fallback cũ)
+                # MỌI THỨ CÒN LẠI (fallback, chặn rác)
                 else:
-                    message = tag
+                    stripped = tag.strip()
+                    if not stripped:
+                        continue
+
+                    # bỏ rác TYPING lẻ
+                    if stripped.startswith("TYPING"):
+                        continue
+
+                    # xử lý case "3saoMSG<hex-id>"
+                    if "MSG" in stripped:
+                        idx = stripped.find("MSG")
+                        before = stripped[:idx]
+                        after = stripped[idx+3:]  # sau chữ MSG
+                        hex_candidate = after.replace("-", "")
+                        if hex_candidate and len(hex_candidate) in (32, 36) and all(
+                            c in "0123456789abcdefABCDEF" for c in hex_candidate
+                        ):
+                            before = before.lstrip("0123456789").strip()
+                            if not before:  # chỉ toàn length, không có text
+                                continue
+                            stripped = before
+
+                    # Fix rác kiểu "-1thanhdat"
+                    if stripped.startswith("-1") and " " not in stripped and len(stripped) < 40:
+                        continue
+
+                    # 1) Nếu lỡ dính USERLIST dạng text -> xử lý & bỏ
+                    if stripped.startswith("USERLIST"):
+                        users_str = stripped[len("USERLIST"):].strip()
+                        if users_str:
+                            users = [u for u in users_str.split(",") if u]
+                            self.update_userlist(users)
+                        continue
+
+                    # 2) Bỏ READ control
+                    if stripped.startswith("READ"):
+                        continue
+
+                    # 3) Bỏ các số thuần (TTL, length, -1, 0, 1,...)
+                    if stripped.lstrip("-").isdigit():
+                        continue
+
+                    # 4) Bỏ log REACT cũ
+                    if "REACT" in stripped or stripped.startswith("@REACT"):
+                        continue
+
+                    # 5) Bỏ log cũ dạng "<msgid>||<emoji>"
+                    if "||" in stripped:
+                        try:
+                            mid, emo = stripped.split("||", 1)
+                            mid = mid.strip()
+                            emo = emo.strip()
+                            hex_candidate2 = mid.replace("-", "")
+                            if (
+                                hex_candidate2
+                                and len(hex_candidate2) in (32, 36)
+                                and all(c in "0123456789abcdefABCDEF" for c in hex_candidate2)
+                                and emo in ["👍", "❤️", "😆", "😢", "😮"]
+                            ):
+                                continue
+                        except ValueError:
+                            pass
+
+                    # 6) Rác lịch sử kiểu "MSG91de9033..." không có khoảng trắng
+                    if stripped.startswith("MSG") and (" " not in stripped) and len(stripped) > 10:
+                        continue
+
+                    # 7) Chuỗi kiểu "<32 hex><tên>" liền nhau
+                    s_no_space = stripped.replace(" ", "")
+                    if len(s_no_space) > 32:
+                        prefix = s_no_space[:32]
+                        if all(c in "0123456789abcdefABCDEF" for c in prefix):
+                            continue
+
+                    # 8) Chuỗi toàn hex id -> bỏ
+                    hex_candidate = stripped.replace("-", "")
+                    if hex_candidate and len(hex_candidate) in (32, 36) and all(
+                        c in "0123456789abcdefABCDEF" for c in hex_candidate
+                    ):
+                        continue
+
+                    # 9) Không phải rác -> hiển thị như message text
+                    message = stripped
 
                     if message.startswith("<Server>"):
                         clean_msg = message.replace("<Server>", "").strip()
@@ -1094,7 +1508,7 @@ class GUI:
                         if message.startswith("<") and ">" in message:
                             end_bracket = message.index(">")
                             sender = message[1:end_bracket]
-                            content = message[end_bracket + 1:].strip()
+                            content = message[end_bracket + 1 :].strip()
                             if sender == "Server":
                                 self.add_system_message(content)
                             else:
@@ -1102,7 +1516,6 @@ class GUI:
                                     content, is_sent=False, sender_name=sender
                                 )
                         else:
-                            # fallback: tin không có "<name>" → bubble xám, không label
                             self.add_message(message, is_sent=False)
 
             except:
@@ -1141,38 +1554,6 @@ class GUI:
         except Exception as e:
             print("show_typing error:", e)
 
-    def sendMessage(self):
-        content_bytes = self.msg.encode()
-        msg_id = self._new_msg_id()
-        ttl_ms = str(self.default_ttl_ms)
-
-        try:
-            # Gửi theo format client->server:
-            # MSG, msg_id, ttl_ms, content_len, content
-            self.server.send(b"MSG")
-            time.sleep(0.02)
-            self.server.send(msg_id.encode())
-            time.sleep(0.02)
-            self.server.send(ttl_ms.encode())
-            time.sleep(0.02)
-            self.server.send(str(len(content_bytes)).encode())
-            time.sleep(0.02)
-            self.server.send(content_bytes)
-        except Exception as e:
-            print("Lỗi gửi MSG:", e)
-            return
-
-        # hiển thị local
-        container = self.add_message(self.msg, is_sent=True)
-        self._bind_right_click(container, msg_id)
-        self._attach_msg_id(container, msg_id)
-
-        # TTL tự hủy
-        if self.default_ttl_ms and int(self.default_ttl_ms) > 0:
-            self.Window.after(
-                int(self.default_ttl_ms), lambda mid=msg_id: self._recall_msg(mid)
-            )
-
     def on_typing(self, event=None):
         try:
             if not self._typing:
@@ -1191,9 +1572,9 @@ class GUI:
 
     def _send_typing_start(self):
         try:
-            self.server.send(b"TYPING")
+            self._safe_send(b"TYPING")
             time.sleep(0.02)
-            self.server.send(b"START")
+            self._safe_send(b"START")
         except Exception as e:
             print("Typing START error:", e)
 
@@ -1201,9 +1582,9 @@ class GUI:
         self._typing = False
         self._typing_after_id = None
         try:
-            self.server.send(b"TYPING")
+            self._safe_send(b"TYPING")
             time.sleep(0.02)
-            self.server.send(b"STOP")
+            self._safe_send(b"STOP")
         except Exception as e:
             print("Typing STOP error:", e)
 
