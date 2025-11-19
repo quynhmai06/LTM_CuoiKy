@@ -1,6 +1,6 @@
-# UTH-CHAT — Simple Python Chat Room
+# UTH-CHAT
 
-UTH-CHAT is a minimal classroom/chatroom project implemented in Python with a server and both GUI and CLI clients. This README explains the core features, installation steps, and basic usage.
+UTH-CHAT
 
 ## ⭐ Tính năng chính
 
@@ -83,16 +83,5 @@ py client.py
 - Không có authentication (username có thể đơn giản gõ và đổi).
 - Short-id (message short index) chưa có; hiện tại `msg_id` dùng UUID hex.
 - Server không lưu file/video bytes trong history (chỉ metadata).
-
-## 🔁 Gợi ý phát triển & tính năng mở rộng
-
-- Cung cấp short ID (m1, m2, ...) để dễ thao tác via CLI.
-- Lưu file/video (server-side) để cho phép tải lại qua history.
-- Hiển thị countdown/undo cho `Tự hủy` local-only.
-- Thêm authentication & persistent accounts.
-
----
-
-Nếu bạn muốn tôi cập nhật README thêm screenshots, hướng dẫn chi tiết cài VLC, hoặc tự động hoá vài bước (ví dụ: `requirements.txt`, setup script), nói cho tôi biết — tôi sẽ bổ sung tiếp.
 
 © UTH-CHAT — project sample (local testing / demo)
