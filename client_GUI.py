@@ -11,6 +11,20 @@ from PIL import Image, ImageTk
 import io
 import base64
 import uuid
+# Installation notes: for inline video playback we use python-vlc (wrapper for VLC)
+# Install it using:
+#   py -m pip install python-vlc
+# You must also have VLC runtime installed on your system (https://www.videolan.org/vlc/).
+import sys
+
+# Optional import: python-vlc for inline video playback. If not available,
+# we'll fallback to opening the file with the OS-default app.
+try:
+    import vlc
+    _HAS_PYTHON_VLC = True
+except Exception:
+    vlc = None
+    _HAS_PYTHON_VLC = False
 
 
 class RoundedText(tk.Canvas):
@@ -444,15 +458,7 @@ class GUI:
         action_frame = tk.Frame(bottom_bar, bg="#242526")
         action_frame.place(relx=0, rely=0, relwidth=1, relheight=0.4)
 
-        mic_btn = tk.Label(
-            action_frame,
-            text="🎤",
-            bg="#242526",
-            fg="#10B981",
-            font="Helvetica 18",
-            cursor="hand2",
-        )
-        mic_btn.place(relx=0.05, rely=0.5, anchor="w")
+        
 
         self.browse = tk.Button(
             action_frame,
@@ -465,30 +471,12 @@ class GUI:
             activebackground="#242526",
             command=self.browseFile,
         )
-        self.browse.place(relx=0.18, rely=0.5, anchor="w")
+        # Move the browse icon a bit left for better spacing
+        self.browse.place(relx=0.08, rely=0.5, anchor="w")
 
-        self.emoji_btn = tk.Button(
-            action_frame,
-            text="😊",
-            bg="#242526",
-            fg="#10B981",
-            font="Helvetica 18",
-            border=0,
-            cursor="hand2",
-            activebackground="#242526",
-            command=self.show_emoji_picker,
-        )
-        self.emoji_btn.place(relx=0.31, rely=0.5, anchor="w")
+        # NOTE: Removed duplicate emoji button here so only the emoji inside the input
+        # is displayed. This keeps the UI cleaner next to the file/send buttons.
 
-        gif_btn = tk.Label(
-            action_frame,
-            text="GIF",
-            bg="#242526",
-            fg="#10B981",
-            font="Helvetica 10 bold",
-            cursor="hand2",
-        )
-        gif_btn.place(relx=0.44, rely=0.5, anchor="w")
 
         self.fileLocation = tk.Label(
             action_frame,
@@ -498,7 +486,8 @@ class GUI:
             font="Helvetica 8",
             anchor="w",
         )
-        self.fileLocation.place(relx=0.58, rely=0.5, anchor="w")
+        # Move filename label a bit left so it fits nicely between browse and send-file
+        self.fileLocation.place(relx=0.48, rely=0.5, anchor="w")
 
         self.sengFileBtn = tk.Button(
             action_frame,
@@ -684,6 +673,7 @@ class GUI:
                     justify="left",
                 )
                 bubble.pack(side="top")
+                msg_container._bubble_label = bubble
 
             time_label = tk.Label(
                 content_frame,
@@ -801,6 +791,7 @@ class GUI:
                     justify="left",
                 )
                 bubble.pack(anchor="w")
+                msg_container._bubble_label = bubble
 
             time_label = tk.Label(
                 text_container,
@@ -828,14 +819,42 @@ class GUI:
         w = self.msg_widgets.pop(msg_id, None)
         if w:
             try:
+                print(f"DEBUG: Removing widget for msg_id={msg_id}")
                 w.destroy()
             except:
                 pass
+        # cleanup metadata and reactions as well
+        try:
+            self.msg_meta.pop(msg_id, None)
+            self.reactions.pop(msg_id, None)
+        except Exception:
+            pass
+
+    def _local_remove_msg_widget(self, msg_id):
+        """
+        Remove message widget only locally, without notifying the server.
+        Used for 'Tự hủy sau...' which should only delete the message on the user's own client.
+        """
+        if not msg_id:
+            return
+        print(f"DEBUG: Locally removing widget for msg_id={msg_id} (no server call)")
+        w = self.msg_widgets.pop(msg_id, None)
+        if w:
+            try:
+                w.destroy()
+            except Exception:
+                pass
+        try:
+            self.msg_meta.pop(msg_id, None)
+            self.reactions.pop(msg_id, None)
+        except Exception:
+            pass
 
     def _recall_msg(self, msg_id):
         if not msg_id:
             return
         try:
+            print(f"DEBUG: Sending RECALL msg_id={msg_id}")
             self._safe_send(b"RECALL")
             time.sleep(0.02)
             self._safe_send(msg_id.encode())
@@ -993,10 +1012,11 @@ class GUI:
             activeforeground="white",
         )
         for sec in (5, 10, 30, 60):
+            # Schedule a local-only deletion (do NOT broadcast RECALL).
             submenu.add_command(
-                label=f"⏱️ {sec} giây",
+                label=f"⏱️ {sec} giây (chỉ xóa ở máy bạn)",
                 command=lambda s=sec, mid=msg_id: self.Window.after(
-                    s * 1000, lambda: self._recall_msg(mid)
+                    s * 1000, lambda mid=mid: self._local_remove_msg_widget(mid)
                 ),
             )
         menu.add_cascade(label="⏰  Tự hủy sau...", menu=submenu)
@@ -1013,6 +1033,156 @@ class GUI:
         )
         for ch in widget.winfo_children():
             self._bind_right_click(ch, msg_id)
+
+    def _bind_file_open(self, container, file_path):
+        """
+        Gắn click trái vào bubble để mở file/video bằng app mặc định của hệ điều hành.
+        """
+        if not file_path:
+            return
+
+        lbl = getattr(container, "_bubble_label", None)
+        if not lbl:
+            return
+
+        def _open(_event=None):
+            # If python-vlc is present and file is a video, toggle inline playback
+            try:
+                _, ext = os.path.splitext(file_path)
+                ext = ext.lower()
+                video_exts = {".mp4", ".mov", ".avi", ".mkv", ".wmv", ".flv"}
+                if _HAS_PYTHON_VLC and ext in video_exts:
+                    try:
+                        self._toggle_inline_video(container, file_path)
+                        return
+                    except Exception as e:
+                        print("Inline player error, fallback to external open:", e)
+
+                # Fallback: open with system default
+                import subprocess
+                path = os.path.abspath(file_path)
+                if sys.platform.startswith("win"):
+                    os.startfile(path)
+                elif sys.platform == "darwin":
+                    subprocess.Popen(["open", path])
+                else:
+                    subprocess.Popen(["xdg-open", path])
+            except Exception as e:
+                print("Open file error:", e)
+
+        lbl.config(cursor="hand2")
+        lbl.bind("<Button-1>", _open)
+
+    def _toggle_inline_video(self, container, file_path):
+        """
+        Toggle inline AV playback in the given message container.
+        If a player exists for that container, stop and remove it; otherwise create and play.
+        """
+        # If already playing: stop and remove
+        if hasattr(container, "_video_player") and container._video_player:
+            try:
+                container._video_player.stop()
+            except Exception:
+                pass
+            try:
+                container._video_player = None
+            except Exception:
+                pass
+            if hasattr(container, "_video_frame") and container._video_frame:
+                try:
+                    container._video_frame.destroy()
+                    container._video_frame = None
+                except Exception:
+                    pass
+            return
+
+        # Create container frame for video
+        try:
+            video_frame = tk.Frame(container, bg="black", width=300, height=200)
+            # Place the frame after the main bubble (append to container)
+            video_frame.pack(side="top", pady=(6, 6))
+            container._video_frame = video_frame
+
+            # Create a control frame
+            ctrl = tk.Frame(video_frame, bg="#111")
+            ctrl.pack(side="bottom", fill="x")
+
+            # Create the player view area
+            view = tk.Frame(video_frame, bg="black")
+            view.pack(side="top", fill="both", expand=True)
+            video_frame.update()
+            wid = view.winfo_id()
+
+            # Create VLC player
+            if not _HAS_PYTHON_VLC:
+                raise RuntimeError("python-vlc not installed")
+
+            player = vlc.MediaPlayer(file_path)
+            # Platform-specific window handle
+            if sys.platform.startswith("win"):
+                player.set_hwnd(wid)
+            elif sys.platform == "darwin":
+                try:
+                    player.set_nsobject(wid)
+                except Exception:
+                    # On macOS sometimes set_nsobject isn't available; fallback to external open
+                    raise
+            else:
+                player.set_xwindow(wid)
+
+            # Play
+            player.play()
+            container._video_player = player
+
+            # Control buttons
+            def _pause():
+                try:
+                    if player.is_playing():
+                        player.pause()
+                    else:
+                        player.play()
+                except Exception as e:
+                    print('VLC pause/play error:', e)
+
+            def _stop():
+                try:
+                    player.stop()
+                except Exception:
+                    pass
+                try:
+                    video_frame.destroy()
+                except Exception:
+                    pass
+                container._video_player = None
+                container._video_frame = None
+
+            btn_pause = tk.Button(ctrl, text="⏯️", command=_pause, bg="#111", fg="white", border=0)
+            btn_pause.pack(side="left", padx=6, pady=4)
+            btn_stop = tk.Button(ctrl, text="⏹️", command=_stop, bg="#111", fg="white", border=0)
+            btn_stop.pack(side="left", padx=6, pady=4)
+
+            # When container is destroyed, make sure to stop player
+            def cleanup_player(_e=None):
+                try:
+                    player.stop()
+                except Exception:
+                    pass
+            container.bind('<Destroy>', cleanup_player)
+
+        except Exception as e:
+            print('Error creating inline player:', e)
+            # Fallback: open external
+            try:
+                import subprocess
+                path = os.path.abspath(file_path)
+                if sys.platform.startswith("win"):
+                    os.startfile(path)
+                elif sys.platform == "darwin":
+                    subprocess.Popen(["open", path])
+                else:
+                    subprocess.Popen(["xdg-open", path])
+            except Exception as e2:
+                print('Fallback open error:', e2)
 
     # ====== HÀM BẮT ĐẦU / HỦY REPLY ======
     def _start_reply(self, msg_id):
@@ -1038,36 +1208,50 @@ class GUI:
     # ==========================================
 
     def browseFile(self):
+        # Show video + image + text filters and All files as default to avoid hiding files
+        # Use current working directory as starting point on Windows
         self.filename = filedialog.askopenfilename(
-            initialdir="/",
+            initialdir=os.getcwd(),
             title="Chọn file",
             filetypes=(
-                ("Image files", "*.png;*.jpg;*.jpeg;*.gif;*.bmp"),
-                ("Text files", "*.txt*"),
                 ("All files", "*.*"),
+                ("Video files", "*.mp4 *.mov *.avi *.mkv *.wmv *.flv"),
+                ("Image files", "*.png *.jpg *.jpeg *.gif *.bmp"),
+                ("Text files", "*.txt"),
             ),
         )
         if self.filename:
             file_ext = os.path.splitext(self.filename)[1].lower()
-            if file_ext in [".png", ".jpg", ".jpeg", ".gif", ".bmp"]:
-                self.fileLocation.configure(
-                    text="🖼️ " + os.path.basename(self.filename)
-                )
+            basename = os.path.basename(self.filename)
+            print(f"DEBUG: browseFile selected {self.filename}")
+            image_exts = [".png", ".jpg", ".jpeg", ".gif", ".bmp"]
+            video_exts = [".mp4", ".mov", ".avi", ".mkv", ".wmv", ".flv"]
+
+            if file_ext in image_exts:
+                self.fileLocation.configure(text="🖼️ " + basename)
+            elif file_ext in video_exts:
+                self.fileLocation.configure(text="🎬 " + basename)
             else:
-                self.fileLocation.configure(
-                    text="📎 " + os.path.basename(self.filename)
-                )
-            self.sengFileBtn.place(relx=0.92, rely=0.5, anchor="center")
+                self.fileLocation.configure(text="📎 " + basename)
+            # Keep send-file button close to the right edge
+            self.sengFileBtn.place(relx=0.86, rely=0.5, anchor="center")
 
     def sendFile(self):
         if not hasattr(self, "filename") or not self.filename:
             return
 
         file_ext = os.path.splitext(self.filename)[1].lower()
-        is_image = file_ext in [".png", ".jpg", ".jpeg", ".gif", ".bmp"]
+        basename = os.path.basename(self.filename)
+        image_exts = [".png", ".jpg", ".jpeg", ".gif", ".bmp"]
+        video_exts = [".mp4", ".mov", ".avi", ".mkv", ".wmv", ".flv"]
 
-        if is_image:
+        # ẢNH
+        if file_ext in image_exts:
+            msg_id = self._new_msg_id()
             self._safe_send(b"IMAGE")
+            time.sleep(0.02)
+            self._safe_send(msg_id.encode())
+            print(f"DEBUG: Sending IMAGE id={msg_id} name={basename} size={os.path.getsize(self.filename)}")
             time.sleep(0.05)
 
             with open(self.filename, "rb") as img_file:
@@ -1077,11 +1261,27 @@ class GUI:
                 self._safe_send(img_data)
 
             with open(self.filename, "rb") as img_file:
-                self.add_message("", is_sent=True, image_data=img_file.read())
-        else:
-            self._safe_send(b"FILE")
+                container = self.add_message(
+                    "",
+                    is_sent=True,
+                    image_data=img_file.read(),
+                )
+            try:
+                container._is_sent = True
+                self._attach_msg_id(container, msg_id)
+                self.msg_meta[msg_id] = {"text": f"IMAGE {basename}", "sender": self.name}
+            except Exception:
+                pass
+
+        # VIDEO
+        elif file_ext in video_exts:
+            msg_id = self._new_msg_id()
+            self._safe_send(b"VIDEO")
+            time.sleep(0.02)
+            self._safe_send(msg_id.encode())
             time.sleep(0.05)
-            basename = os.path.basename(self.filename)
+            print(f"DEBUG: Sending VIDEO name={basename} size={os.path.getsize(self.filename)}")
+
             self._safe_send(("client_" + basename).encode())
             time.sleep(0.05)
             self._safe_send(str(os.path.getsize(self.filename)).encode())
@@ -1093,7 +1293,59 @@ class GUI:
                     if not data:
                         break
                     self._safe_send(data)
-            self.add_message("📄 " + basename, is_sent=True)
+
+            container = self.add_message(
+                f"🎬 {basename} (bấm để xem)",
+                is_sent=True,
+            )
+            try:
+                self._bind_file_open(container, self.filename)
+            except Exception as e:
+                print("Bind open (send) video error:", e)
+            # Attach msg_id so reaction/reply/recall works on file/video messages
+            try:
+                container._is_sent = True
+                self._attach_msg_id(container, msg_id)
+                self.msg_meta[msg_id] = {"text": f"VIDEO {basename}", "sender": self.name}
+            except Exception:
+                pass
+            print(f"DEBUG: VIDEO sent {basename} size={os.path.getsize(self.filename)}")
+
+        # CÁC FILE KHÁC
+        else:
+            # FILE generic
+            msg_id = self._new_msg_id()
+            self._safe_send(b"FILE")
+            time.sleep(0.02)
+            self._safe_send(msg_id.encode())
+            time.sleep(0.02)
+            time.sleep(0.05)
+            print(f"DEBUG: Sending FILE name={basename} size={os.path.getsize(self.filename)}")
+
+            self._safe_send(("client_" + basename).encode())
+            time.sleep(0.05)
+            self._safe_send(str(os.path.getsize(self.filename)).encode())
+            time.sleep(0.05)
+
+            with open(self.filename, "rb") as f:
+                while True:
+                    data = f.read(4096)
+                    if not data:
+                        break
+                    self._safe_send(data)
+
+            container = self.add_message(
+                f"📄 {basename}",
+                is_sent=True,
+            )
+            self._bind_file_open(container, self.filename)
+            try:
+                container._is_sent = True
+                self._attach_msg_id(container, msg_id)
+                self.msg_meta[msg_id] = {"text": f"FILE {basename}", "sender": self.name}
+            except Exception:
+                pass
+            print(f"DEBUG: FILE sent {basename} size={os.path.getsize(self.filename)}")
 
         self.fileLocation.configure(text="")
         self.sengFileBtn.place_forget()
@@ -1136,6 +1388,7 @@ class GUI:
         <emoji>
         """
         try:
+            print(f"DEBUG: Sending REACT msg_id={msg_id} emoji={emoji}")
             self._safe_send(b"REACT")
             time.sleep(0.02)
             self._safe_send(msg_id.encode())
@@ -1162,6 +1415,7 @@ class GUI:
         try:
             if reply_to:
                 # ===== REPLY =====
+                print(f"DEBUG: Sending REPLY reply_to={reply_to} msg_id={msg_id}")
                 self._safe_send(b"REPLY")
                 time.sleep(0.02)
                 self._safe_send(reply_to.encode())
@@ -1224,6 +1478,7 @@ class GUI:
 
                 # ẢNH
                 if tag == "IMAGE":
+                    msg_id = self.server.recv(1024).decode()
                     size_str = self.server.recv(1024).decode()
                     total_len = int(size_str)
                     sender = self.server.recv(1024).decode()
@@ -1235,33 +1490,89 @@ class GUI:
                             break
                         img_data += chunk
 
-                    self.add_message(
+                    container = self.add_message(
                         "",
                         is_sent=(sender == self.name),
                         sender_name=(None if sender == self.name else sender),
                         image_data=img_data,
                     )
+                    try:
+                        container._is_sent = (sender == self.name)
+                        self._attach_msg_id(container, msg_id)
+                        self.msg_meta[msg_id] = {"text": f"IMAGE from {sender}", "sender": sender}
+                    except Exception:
+                        pass
 
                 # FILE
                 elif tag == "FILE":
+                    msg_id = self.server.recv(1024).decode()
                     file_name = self.server.recv(1024).decode()
                     lenOfFile = int(self.server.recv(1024).decode())
                     send_user = self.server.recv(1024).decode()
 
                     total = 0
-                    with open(file_name, "wb") as file:
-                        while total < lenOfFile:
-                            data = self.server.recv(min(4096, lenOfFile - total))
-                            if not data:
-                                break
-                            total += len(data)
-                            file.write(data)
+                    if lenOfFile > 0:
+                        with open(file_name, "wb") as file:
+                            while total < lenOfFile:
+                                data = self.server.recv(min(4096, lenOfFile - total))
+                                if not data:
+                                    break
+                                total += len(data)
+                                file.write(data)
 
-                    self.add_message(
+                    container = self.add_message(
                         f"📄 {file_name}",
                         is_sent=(send_user == self.name),
                         sender_name=(None if send_user == self.name else send_user),
                     )
+
+                    # attach msg id so reactions, reply, recall work
+                    try:
+                        container._is_sent = (send_user == self.name)
+                        self._attach_msg_id(container, msg_id)
+                        self.msg_meta[msg_id] = {"text": file_name, "sender": send_user}
+                    except Exception:
+                        pass
+                    # Gắn mở file khi bấm vào bubble
+                    try:
+                        self._bind_file_open(container, file_name)
+                    except Exception as e:
+                        print("Bind open file error:", e)
+
+                # VIDEO
+                elif tag == "VIDEO":
+                    msg_id = self.server.recv(1024).decode()
+                    file_name = self.server.recv(1024).decode()
+                    lenOfFile = int(self.server.recv(1024).decode())
+                    send_user = self.server.recv(1024).decode()
+
+                    total = 0
+                    if lenOfFile > 0:
+                        with open(file_name, "wb") as file:
+                            while total < lenOfFile:
+                                data = self.server.recv(min(4096, lenOfFile - total))
+                                if not data:
+                                    break
+                                total += len(data)
+                                file.write(data)
+
+                    container = self.add_message(
+                        f"🎬 {file_name} (bấm để xem)",
+                        is_sent=(send_user == self.name),
+                        sender_name=(None if send_user == self.name else send_user),
+                    )
+                    # Gắn mở video khi bấm vào bubble
+                    try:
+                        self._bind_file_open(container, file_name)
+                    except Exception as e:
+                        print("Bind open video error:", e)
+                    # Attach msg id for video
+                    try:
+                        container._is_sent = (send_user == self.name)
+                        self._attach_msg_id(container, msg_id)
+                        self.msg_meta[msg_id] = {"text": file_name, "sender": send_user}
+                    except Exception:
+                        pass
 
                 # MSG
                 elif tag == "MSG":
@@ -1332,6 +1643,7 @@ class GUI:
                         preview_text = "(Tin nhắn không còn hoặc ở phiên khác)"
                         preview_sender = ""
 
+                    print(f"DEBUG: Received REPLY reply_to={reply_to_id} msg_id={msg_id} sender={sender} len={content_len}")
                     container = self.add_message(
                         text,
                         is_sent=is_me,
@@ -1348,12 +1660,14 @@ class GUI:
                     msg_id = self.server.recv(1024).decode(errors="ignore").strip()
                     sender = self.server.recv(1024).decode(errors="ignore").strip()
                     reaction = self.server.recv(1024).decode(errors="ignore")
+                    print(f"DEBUG: Received REACT msg_id={msg_id} sender={sender} emoji={reaction}")
                     self._apply_reaction(msg_id, reaction, sender)
 
                 # RECALL
                 elif tag == "RECALL":
                     msg_id = self.server.recv(1024).decode()
                     _sender = self.server.recv(1024).decode()
+                    print(f"DEBUG: Received RECALL msg_id={msg_id} sender={_sender}")
                     self._remove_msg_widget(msg_id)
 
                 # READ (có thể dính msg_id)
@@ -1701,6 +2015,17 @@ class GUI:
         try:
             self.server.close()
         except:
+            pass
+        # Stop any running VLC players in message widgets
+        try:
+            for cont in list(self.msg_widgets.values()):
+                player = getattr(cont, "_video_player", None)
+                try:
+                    if player:
+                        player.stop()
+                except Exception:
+                    pass
+        except Exception:
             pass
         try:
             self.Window.destroy()

@@ -1,0 +1,11 @@
+{"user": "1", "type": "text", "content": {"msg_id": "7d9fd4c84c4044bd9017c9998c58c11e", "text": "hi"}, "ts": "2025-11-19 18:51:41"}
+{"user": "2", "type": "text", "content": {"msg_id": "435f370e9d274e92af416dec97e57489", "text": "hi cau"}, "ts": "2025-11-19 18:51:44"}
+{"user": "1", "type": "file", "content": {"msg_id": "3952bce216d94ee0afd9c2ca1a5db0c0", "file_name": "client_client_báo cáo12.docx"}, "ts": "2025-11-19 18:51:55"}
+{"user": "2", "type": "video", "content": {"msg_id": "d06c86a5690b40209f867fddc19ccf56", "file_name": "client_client_chuan.mp4"}, "ts": "2025-11-19 18:52:08"}
+{"user": "1", "type": "text", "content": {"msg_id": "c43a4f8ca86049389abfdcd32ea32064", "text": "hi"}, "ts": "2025-11-19 18:52:35"}
+{"user": "2", "type": "text", "content": {"msg_id": "152df7524f0a4c2085a04e02bd2d1a71", "text": "hi"}, "ts": "2025-11-19 18:52:37"}
+{"user": "1", "type": "text", "content": {"msg_id": "0f8ff0d0e50d44caa9efc27109a14842", "text": "hi"}, "ts": "2025-11-19 18:53:05"}
+{"user": "1", "type": "react", "content": {"msg_id": "152df7524f0a4c2085a04e02bd2d1a71", "reaction": "👍"}, "ts": "2025-11-19 18:53:20"}
+{"user": "1", "type": "react", "content": {"msg_id": "152df7524f0a4c2085a04e02bd2d1a71", "reaction": "❤️"}, "ts": "2025-11-19 18:53:24"}
+{"user": "1", "type": "text", "content": {"msg_id": "524be158b62e492d8e6103ad131020a7", "text": "ê"}, "ts": "2025-11-19 18:53:27"}
+{"user": "3", "type": "text", "content": {"msg_id": "f946539f65a24131bcc2f486e26c8fd2", "text": "hi"}, "ts": "2025-11-19 19:05:24"}

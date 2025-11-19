@@ -133,9 +133,15 @@ class Server:
                     break
 
                 tag = header.decode(errors="ignore")
+                try:
+                    print(f"[Server] Received header from {user_id}: {tag}")
+                except Exception:
+                    print(f"[Server] Received header: {tag}")
 
                 if tag == "FILE":
                     self.broadcastFile(connection, room_id, user_id)
+                elif tag == "VIDEO":
+                    self.broadcastVideo(connection, room_id, user_id)
 
                 elif tag == "IMAGE":
                     self.broadcastImage(connection, room_id, user_id)
@@ -188,16 +194,21 @@ class Server:
                 break
 
     def broadcastFile(self, connection, room_id, user_id):
+        # New protocol: FILE frame includes msg_id first
+        msg_id = connection.recv(1024).decode()
         file_name = connection.recv(1024).decode()
-        lenOfFile = connection.recv(1024).decode()
+        lenOfFile = int(connection.recv(1024).decode())
+        print(f"[Server] broadcastFile started from {user_id}: file_name={file_name} len={lenOfFile}")
         for client in self.rooms[room_id]:
             if client != connection:
                 try:
                     client.send("FILE".encode())
+                    time.sleep(0.05)
+                    client.send(msg_id.encode())
                     time.sleep(0.1)
                     client.send(file_name.encode())
                     time.sleep(0.1)
-                    client.send(lenOfFile.encode())
+                    client.send(str(lenOfFile).encode())
                     time.sleep(0.1)
                     client.send(user_id.encode())
                 except:
@@ -206,9 +217,11 @@ class Server:
 
         total = 0
         print(file_name, lenOfFile)
-        while str(total) != lenOfFile:
-            data = connection.recv(1024)
+        while total < lenOfFile:
+            data = connection.recv(min(4096, lenOfFile - total))
             total = total + len(data)
+            if total % (1024 * 50) == 0:
+                print(f"[Server] broadcastFile receive progress for {file_name}: {total} bytes")
             for client in self.rooms[room_id]:
                 if client != connection:
                     try:
@@ -218,15 +231,85 @@ class Server:
                         self.remove(client, room_id)
         print("Gui file xong")
 
-        # LƯU LỊCH SỬ FILE
+        # LƯU LỊCH SỬ FILE (gồm msg_id và file_name)
         try:
             self._store_history(room_id, user_id, f"[FILE] {file_name}")
-            save_message(room_id, user_id, "file", file_name)
+            save_message(room_id, user_id, "file", {"msg_id": msg_id, "file_name": file_name})
         except Exception as e:
             print("Loi luu history file:", e)
 
+    def broadcastVideo(self, connection, room_id, user_id):
+        """
+        Gửi video cho tất cả client trong phòng.
+        Cấu trúc frame giống FILE:
+        VIDEO
+        <file_name>
+        <lenOfFile>
+        <user_id>
+        <bytes...>
+        """
+        try:
+            # New protocol: VIDEO frame includes msg_id first
+            msg_id = connection.recv(1024).decode()
+            file_name = connection.recv(1024).decode()
+            lenOfFile = connection.recv(1024).decode()
+            print(f"[Server] broadcastVideo started from {user_id}: file_name={file_name} len={lenOfFile}")
+            length = int(lenOfFile)
+
+            # Gửi header VIDEO cho các client khác
+            for client in list(self.rooms[room_id]):
+                if client is connection:
+                    continue
+                try:
+                    client.send(b"VIDEO")
+                    time.sleep(0.05)
+                    client.send(msg_id.encode())
+                    time.sleep(0.1)
+                    client.send(file_name.encode())
+                    time.sleep(0.1)
+                    client.send(lenOfFile.encode())
+                    time.sleep(0.1)
+                    client.send(user_id.encode())
+                    time.sleep(0.1)
+                except:
+                    client.close()
+                    self.remove(client, room_id)
+
+            # Relay data video
+            total = 0
+            while total < length:
+                data = connection.recv(min(4096, length - total))
+                if not data:
+                    break
+                total += len(data)
+                if total % (1024 * 50) == 0:
+                    print(f"[Server] broadcastVideo receive progress for {file_name}: {total} bytes")
+                for client in list(self.rooms[room_id]):
+                    if client is connection:
+                        continue
+                    try:
+                        client.send(data)
+                    except:
+                        client.close()
+                        self.remove(client, room_id)
+
+            print(f"Gui video xong: {file_name} ({total} bytes)")
+
+            # Lưu history video
+            try:
+                self._store_history(room_id, user_id, f"[VIDEO] {file_name}")
+                save_message(room_id, user_id, "video", {"msg_id": msg_id, "file_name": file_name})
+            except Exception as e:
+                print("Loi luu history video:", e)
+
+        except Exception as e:
+            print("Loi broadcastVideo:", e)
+
     def broadcastImage(self, connection, room_id, user_id):
         try:
+            print(f"[Server] broadcastImage started from {user_id}")
+            # New protocol: IMAGE frame includes msg_id first
+            msg_id = connection.recv(1024).decode()
             size_str = connection.recv(1024).decode(errors="ignore")
             try:
                 total_len = int(size_str)
@@ -239,6 +322,8 @@ class Server:
                     continue
                 try:
                     client.send("IMAGE".encode())
+                    time.sleep(0.05)
+                    client.send(msg_id.encode())
                     time.sleep(0.05)
                     client.send(str(total_len).encode())
                     time.sleep(0.05)
@@ -268,7 +353,7 @@ class Server:
 
             print(f"Gui image xong ({sent_total} bytes) tu {user_id}")
 
-            # LƯU LỊCH SỬ ẢNH
+            # LƯU LỊCH SỬ ẢNH (gồm msg_id)
             try:
                 if image_data:
                     b64 = base64.b64encode(image_data).decode("ascii")
@@ -276,7 +361,7 @@ class Server:
                         room_id,
                         user_id,
                         "image",
-                        {"size": sent_total, "data": b64},
+                        {"msg_id": msg_id, "size": sent_total, "data": b64},
                     )
                     self._store_history(room_id, user_id, f"[IMAGE] {sent_total} bytes")
             except Exception as e:
@@ -388,6 +473,7 @@ class Server:
                 full_data += chunk
 
             text = full_data.decode(errors="ignore")
+            print(f"[Server] broadcastReply: {user_id} -> reply_to={reply_to} msg_id={msg_id} len={len(text)}")
 
             # CHECK MUTE + FILTER BAD WORDS
             now = time.time()
@@ -477,6 +563,7 @@ class Server:
             if reaction not in allowed:
                 return
 
+            print(f"[Server] broadcastReact: from {user_id} to {msg_id} reaction={reaction}")
             # Lưu history reaction
             try:
                 save_message(
@@ -525,6 +612,7 @@ class Server:
     def broadcastRecall(self, connection, room_id, user_id):
         try:
             msg_id = connection.recv(1024).decode(errors="ignore")
+            print(f"[Server] broadcastRecall: from {user_id} msg_id={msg_id}")
             for client in list(self.rooms[room_id]):
                 try:
                     client.send(b"RECALL")
@@ -696,11 +784,53 @@ class Server:
                     size = len(img_bytes)
                     connection.send(b"IMAGE")
                     time.sleep(0.05)
+                    connection.send(msg_id.encode())
+                    time.sleep(0.05)
                     connection.send(str(size).encode())
                     time.sleep(0.05)
                     connection.send(user.encode())
                     time.sleep(0.05)
                     connection.send(img_bytes)
+                    time.sleep(0.05)
+
+                # ===== FILE =====
+                elif typ == "file":
+                    # content expected to be {"msg_id": ..., "file_name": ...}
+                    if isinstance(content, dict):
+                        msg_id = content.get("msg_id", uuid.uuid4().hex)
+                        file_name = content.get("file_name", "file")
+                    else:
+                        msg_id = uuid.uuid4().hex
+                        file_name = str(content)
+                    # We don't have file content; send len=0 so client can show metadata
+                    connection.send(b"FILE")
+                    time.sleep(0.05)
+                    connection.send(msg_id.encode())
+                    time.sleep(0.05)
+                    connection.send(file_name.encode())
+                    time.sleep(0.05)
+                    connection.send(str(0).encode())
+                    time.sleep(0.05)
+                    connection.send(user.encode())
+                    time.sleep(0.05)
+
+                # ===== VIDEO =====
+                elif typ == "video":
+                    if isinstance(content, dict):
+                        msg_id = content.get("msg_id", uuid.uuid4().hex)
+                        file_name = content.get("file_name", "video")
+                    else:
+                        msg_id = uuid.uuid4().hex
+                        file_name = str(content)
+                    connection.send(b"VIDEO")
+                    time.sleep(0.05)
+                    connection.send(msg_id.encode())
+                    time.sleep(0.05)
+                    connection.send(file_name.encode())
+                    time.sleep(0.05)
+                    connection.send(str(0).encode())
+                    time.sleep(0.05)
+                    connection.send(user.encode())
                     time.sleep(0.05)
 
                 # ===== REACTION =====
